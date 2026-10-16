@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "atlastimed.omachines",
+  "name": "Omachines",
+  "version": "0.1.0",
+  "author": "atlastimed",
+  "license": "MIT",
+  "description": "Windows VM controls, agent connections and complete backups in the Omarchy bar.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {"service": "Service.qml", "barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "Omachines",
+    "category": "System",
+    "aliases": ["vm", "windows", "machines"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {"pollSeconds": 120, "notify": true, "asideEnabled": true, "showLabel": true, "setupWorkspace": ""},
+    "schema": [
+      {"key":"pollSeconds","type":"integer","label":"Connection check interval (seconds)","min":30,"max":900,"step":30,"defaultValue":120,"description":"One check shared by every monitor. Lightweight status updates every 15 seconds; Check connections performs a fresh guest probe."},
+      {"key":"notify","type":"boolean","label":"Operation notifications","defaultValue":true,"description":"Notify when backups or lifecycle operations finish or fail."},
+      {"key":"asideEnabled","type":"boolean","label":"Aside integration","defaultValue":true,"description":"Show Aside controls and check its local browser connection. Never starts AI tasks."},
+      {"key":"showLabel","type":"boolean","label":"Show name in the bar","defaultValue":true},
+      {"key":"setupWorkspace","type":"string","label":"Windows setup workspace","defaultValue":"","description":"Folder containing the existing reviewed create-development-backup.sh and research completion records. Optional; needed for backups."}
+    ]
+  }
+}
