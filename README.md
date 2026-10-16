@@ -49,6 +49,11 @@ shell or Windows restart. A content-addressed `runtime/` directory prevents
 Quickshell from retaining old QML components after an update. One release is
 installed at a time; old releases remain in the private installer backups.
 Updates are manual: update your checkout, run the checks, then rerun the installer.
+Updates and file rollback leave the current shell settings untouched. Initial
+placement, removal and an explicitly supplied workspace use Omarchy's native
+settings API. If that final API step fails, the installed files and current
+settings are retained for inspection. Malformed or symlinked `shell.json` files
+are rejected before changing the installation.
 
 Optional existing executable wrappers in `~/.local/bin/`:
 `windows-vm-launch`, `windows-vm-ssh`, `windows-vm-mcp`, and
@@ -76,7 +81,10 @@ The full backup contains signed-in browser state and private configuration and
 must stay on the encrypted backup disk with its existing restricted permissions.
 
 One worker lock prevents overlapping operations. Lifecycle workers survive bar
-reloads. A stopped or interrupted worker is reported honestly; interrupted backups
+reloads. Each request has a one-use identity and a 120-second startup deadline;
+expired or replaced requests cannot execute later. Installation/removal holds a
+maintenance gate for the entire transaction and refuses pending or active work.
+A stopped or interrupted worker is reported honestly; interrupted backups
 leave `.incomplete` data for inspection. The provider holds Omarchy's lifecycle
 lock while copying, preventing a viewer launch from starting Windows mid-copy.
 Do not manually start/stop Docker containers during backup. If an operation
@@ -115,6 +123,7 @@ Project files:
 - `backend/core.py`, `guest-status.ps1`: bounded Windows adapter and typed status.
 - `backend/operations.py`: allowlisted actions, durable progress and backups.
 - `backend/mcp.py`: short-lived MCP connections with timeouts and output limits.
+- `backend/probes.py`: incremental bounded IO and owned probe-group cleanup.
 - `backend/omachinesctl`: status, action, daemon and worker entry points.
 
 Future scope: allocation editing with safe restart, tested restoration, portable
@@ -126,3 +135,5 @@ Contract reference: [Omarchy plugin development guide](https://plugins.omarchy.o
 
 See [validation](VALIDATION.md), [security boundaries](SECURITY.md) and
 [contribution checks](CONTRIBUTING.md) before changing or distributing the plugin.
+The initial review findings and regression evidence are mapped in
+[review fixes](REVIEW-FIXES.md).

@@ -90,7 +90,7 @@ class CoreTests(unittest.TestCase):
 
     def test_backup_offline_is_expected(self):
         operations.record('backup','running','Copying')
-        with patch('core.tcp',return_value=False),patch('core.viewer_windows',return_value=[]),patch('core.backups',return_value=[]):
+        with patch('core.operation_locked',return_value=True),patch('core.tcp',return_value=False),patch('core.viewer_windows',return_value=[]),patch('core.backups',return_value=[]):
             state=core.collect(core.settings())
         self.assertEqual(state['summary'],'Backup in progress')
         self.assertEqual(state['checks']['desktop']['message'],'Unavailable during backup')
@@ -100,15 +100,6 @@ class CoreTests(unittest.TestCase):
         with open(core.state_dir()/'operation.lock','a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             with self.assertRaises(core.OperationError):operations.request_action('open',{'demo':False})
-
-    def test_installer_preserves_other_settings(self):
-        sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-        import install
-        data={'bar':{'layout':{'right':[{'id':'other.plugin','anything':42},{'id':core.ID,'notify':False}]}},'unrelated':1}
-        install.set_workspace(data,Path('/some/setup'))
-        self.assertEqual(data['bar']['layout']['right'][0],{'id':'other.plugin','anything':42})
-        self.assertFalse(data['bar']['layout']['right'][1]['notify'])
-        self.assertEqual(data['unrelated'],1)
 
     def test_release_staging_uses_real_content_and_excludes_secrets(self):
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]))

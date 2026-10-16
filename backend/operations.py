@@ -7,9 +7,10 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
-from core import (ROOT, OperationError, backups, busy, check, collect, now, operation, read_json,
-                  run, settings, state_dir, viewer_windows, wrapper, write_json)
+from core import (ROOT, OperationError, admission, backups, busy, check, collect, now, operation, read_json,
+                  reservation_fresh, run, settings, state_dir, viewer_windows, wrapper, write_json)
 from mcp import Client
 
 ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics"}
@@ -37,12 +38,15 @@ def request_action(action, config, confirmed=False):
     if action in DISRUPTIVE and not confirmed:
         raise OperationError("Confirm this action first")
     # Reservation prevents two widgets from starting overlapping workers.
-    with open(state_dir()/"request.lock","a") as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX)
+    with admission():
         if busy():
             raise OperationError("Another operation is still running")
-        argv=["/usr/bin/python3","-B",str(ROOT/"backend/omachinesctl"),"worker",action]
-        record(action,"starting","Waiting for the operation to start",startedEpoch=time.time())
+        request_id = uuid.uuid4().hex
+        started = time.time()
+        argv=["/usr/bin/python3","-B",str(ROOT/"backend/omachinesctl"),"worker",action,
+              "--request-id",request_id]
+        record(action,"starting","Waiting for the operation to start",startedEpoch=started,
+               expiresEpoch=started+120,requestId=request_id)
         try:
             if action in TERMINAL:
                 subprocess.Popen(["/usr/bin/omarchy-launch-terminal",*argv,"--interactive"],
@@ -52,6 +56,7 @@ def request_action(action, config, confirmed=False):
         except OSError:
             record(action,"failed","Could not start the operation")
             raise OperationError("Could not open the operation terminal") from None
+        return request_id
 
 
 def vm_priv(action):
@@ -86,6 +91,10 @@ def backup(config):
     source=script.read_text()
     if "OMACHINES_PROGRESS_FD" not in source or "backup_copy_lock" not in source:
         raise OperationError("The backup provider needs the Omachines progress/locking update")
+    try:
+        old_path = (workspace/"research/development-ready.path").read_text().strip()
+    except FileNotFoundError:
+        old_path = ""
     # Preserve imported completion records before the provider advances its
     # latest-backup pointer. Never drop the original development baseline.
     write_json(state_dir()/"backups.json", backups(config))
@@ -116,7 +125,8 @@ def backup(config):
         status=(workspace/"research/development-ready.status").read_text().strip()
     except OSError:
         raise OperationError("Backup result could not be read") from None
-    if status!="complete" or not path.is_dir() or not re.fullmatch(r"development-ready-\d{8}T\d{6}Z",path.name):
+    if (status!="complete" or not path.is_absolute() or str(path)==old_path
+            or not path.is_dir() or not re.fullmatch(r"development-ready-\d{8}T\d{6}Z",path.name)):
         raise OperationError("Backup completion could not be verified")
     records=read_json(state_dir()/"backups.json",[])
     records=records if isinstance(records,list) else []
@@ -188,14 +198,33 @@ def perform(action, config):
     raise OperationError("Unknown action")
 
 
-def worker(action, interactive=False):
-    config=settings()
+def worker(action, request_id, interactive=False):
     with open(state_dir()/"operation.lock","a") as lock:
         try:
-            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:
+            # The child can start before Popen returns in the requesting
+            # process. Allow that short admission-lock handoff, then validate
+            # identity and expiry while holding the gate.
+            with admission(timeout=2):
+                reservation = read_json(state_dir()/"operation.json", {})
+                if (not isinstance(reservation, dict) or not request_id
+                        or reservation.get("requestId") != request_id
+                        or reservation.get("action") != action
+                        or reservation.get("status") != "starting"
+                        or not reservation_fresh(reservation)):
+                    raise OperationError("This operation request expired or was superseded; request it again")
+                config=settings()
+                if config["demo"]:
+                    record(action,"failed","Demo mode never controls a real VM")
+                    raise OperationError("Demo mode never controls a real VM")
+                try:
+                    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise OperationError("Another operation is still running") from None
+                record(action,"running","Preparing "+action,requestId=request_id)
+        except OperationError as error:
+            if interactive:
+                print(str(error),flush=True)
             return 1
-        record(action,"running","Preparing "+action)
         try:
             message=perform(action,config)
             record(action,"complete",message)

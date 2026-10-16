@@ -17,6 +17,11 @@ Trust boundaries:
 - Backup source markers are compatibility checks, not script authentication.
 - Guest responses are reduced to known status fields. The panel does not read
   browser pages, bookmarks or credentials for health checks.
+- Probe stdout is capped while reading, including data without newlines. Probe
+  process groups are cleaned up on completion, timeout, normal owner exit,
+  SIGTERM and SIGHUP. Detached lifecycle workers have a separate lifetime.
+  This is not containment for a malicious host executable that escapes its
+  process group, nor a cleanup guarantee after an uncatchable owner SIGKILL.
 - Reports and operation records are private local files. Reports omit account
   IDs, guest paths, window titles and raw command output. Review any report
   before attaching it to a public issue.

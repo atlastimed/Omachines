@@ -1,5 +1,6 @@
 """Omarchy Windows adapter and private state. Standard library only."""
 import base64
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import json
@@ -7,12 +8,11 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import socket
-import subprocess
 import time
 
 from mcp import Client, ProbeError
+from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
@@ -94,19 +94,10 @@ def settings(overrides=None):
 
 def run(command, timeout=15):
     # All callers supply argv; remote output is parsed, never included in errors.
-    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
     try:
-        data, _ = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        p.communicate()
-        raise OperationError("The connection timed out") from None
-    if p.returncode:
-        raise OperationError("The command did not complete successfully")
-    if len(data) > 2 * 1024 * 1024:
-        raise OperationError("The response exceeded its size limit")
-    return data.decode("utf-8", errors="replace").strip()
+        return output(command, timeout)
+    except ProbeError as error:
+        raise OperationError(str(error)) from None
 
 
 def wrapper(name):
@@ -148,8 +139,8 @@ def parse_guest(raw):
     result["asideInstalled"] = raw.get("asideInstalled") is True
     result["asideRunning"] = raw.get("asideRunning") is True
     path = raw.get("asidePath", "")
-    result["asidePath"] = path if re.fullmatch(r"[A-Za-z]:\\Users\\[^\\\r\n]+\\AppData\\Local\\Aside\\Application\\aside\.exe", path, re.I) else ""
-    result["boot"] = str(raw.get("boot", ""))[:40]
+    result["asidePath"] = path if isinstance(path, str) and re.fullmatch(r"[A-Za-z]:\\Users\\[^\\\r\n]+\\AppData\\Local\\Aside\\Application\\aside\.exe", path, re.I) else ""
+    result["boot"] = raw.get("boot", "")[:40] if isinstance(raw.get("boot"), str) else ""
     return result
 
 
@@ -164,6 +155,43 @@ def viewer_windows():
         return []
 
 
+def reservation_fresh(value):
+    started = value.get("startedEpoch")
+    expires = value.get("expiresEpoch")
+    return (isinstance(started, (float, int)) and isinstance(expires, (float, int))
+            and 0 <= time.time() - started < 120 and time.time() < expires)
+
+
+@contextmanager
+def admission(timeout=0):
+    # Lock order: request gate, then operation lock. Maintenance keeps both
+    # for its entire transaction. Workers release the gate after consumption.
+    with open(state_dir()/"request.lock", "a") as lock:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OperationError("Omachines maintenance or another request is in progress") from None
+                time.sleep(0.02)
+        yield
+
+
+@contextmanager
+def maintenance():
+    with admission():
+        if busy():
+            raise OperationError("Wait for the Omachines operation to finish before updating or removing it")
+        with open(state_dir()/"operation.lock", "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise OperationError("An Omachines operation is still running") from None
+            yield
+
+
 def operation():
     value = read_json(state_dir()/"operation.json", {})
     if not isinstance(value, dict):
@@ -172,18 +200,26 @@ def operation():
         pid = value.get("pid", 0)
         alive = isinstance(pid, int) and pid > 0 and Path(f"/proc/{pid}").exists()
         if value.get("status") == "starting":
-            alive = time.time() - value.get("startedEpoch", 0) < 120
+            alive = reservation_fresh(value)
+        else:
+            alive = alive and operation_locked()
         if not alive:
             value = {**value, "status": "interrupted", "message": "Operation interrupted. Check Windows and the backup terminal before retrying."}
     return value
 
 
-def busy():
+def operation_locked():
     with open(state_dir()/"operation.lock", "a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
+    return False
+
+
+def busy():
+    if operation_locked():
+        return True
     return operation().get("status") in ("running", "starting")
 
 
@@ -192,8 +228,21 @@ def fresh_checks(previous, interval):
         stamp = previous["checks"]["ssh"]["checkedAt"]
         age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(stamp)).total_seconds()
         return 0 <= age <= max(60, interval * 2)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return False
+
+
+def refresh_snapshot(config, previous, deep):
+    try:
+        return collect(config, deep=deep, previous=previous)
+    except Exception:
+        # A failed collection must not republish old readiness. Shallow polls
+        # retain this failure until a deep probe produces replacement evidence.
+        return {**previous, "state":"unknown", "summary":"Connection checks failed",
+                "error":"Connection check failed; check the connections and retry",
+                "checks":{key:check("error", "Connection state unavailable")
+                          for key in ("ssh", "desktop", "cua", "aside")},
+                "resources":{}, "guest":{}}
 
 
 def backups(config):
@@ -259,7 +308,7 @@ def collect(config, deep=False, previous=None):
     op = operation()
     s = {"schemaVersion":1,"name":"Windows 11","checkedAt":now(),"demo":False,"capabilities":caps,
          "operation":op,"viewerOpen":bool(viewer_windows()),"backups":backups(config),"checks":{},
-         "sharedPath":str(Path.home()/"Windows"),"storage":{},"resources":{}}
+         "sharedPath":str(Path.home()/"Windows"),"storage":{},"resources":{},"error":""}
     try:
         usage = shutil.disk_usage(Path.home()/".windows")
         s["storage"] = {"availableBytes":usage.free,"totalBytes":usage.total}
@@ -279,10 +328,13 @@ def collect(config, deep=False, previous=None):
     s.update(state="starting" if not ssh_port else "running", summary="Windows is starting" if not ssh_port else "Windows is reachable")
     if not deep:
         if previous:
+            s["error"] = previous.get("error", "")
             s["checks"] = previous.get("checks", {})
             s["resources"] = previous.get("resources", {})
             s["guest"] = previous.get("guest", {})
-            if ssh_port and previous.get("state")=="running" and fresh_checks(previous, config["pollSeconds"]):
+            if s["error"]:
+                s["summary"]="Windows is reachable; connection checks failed"
+            elif ssh_port and previous.get("state")=="running" and fresh_checks(previous, config["pollSeconds"]):
                 s["summary"]=previous.get("summary",s["summary"])
             elif ssh_port:
                 s["summary"]="Windows is reachable; connection checks are due"
@@ -308,7 +360,11 @@ def collect(config, deep=False, previous=None):
         try:
             with Client([wrapper("windows-vm-mcp")],10) as client:
                 result=client.call("health_report",{"include":["session_active","ax_capability","screen_capture_capability"]})
+                if not isinstance(result, dict):
+                    raise ProbeError("Invalid Cua result")
                 health=result.get("structuredContent",{})
+                if not isinstance(health, dict):
+                    raise ProbeError("Invalid Cua health response")
                 ok=health.get("schema_version")=="1" and health.get("overall")=="ok"
                 s["checks"]["cua"]=check("ready" if ok else "error","Desktop tools responding" if ok else "Cua needs attention")
         except (OSError, ProbeError, BrokenPipeError):

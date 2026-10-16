@@ -2,20 +2,15 @@
 import json
 import os
 import selectors
-import signal
-import subprocess
 import time
-
-
-class ProbeError(Exception):
-    pass
+from probes import LIMIT, Process, ProbeError
 
 
 class Client:
     def __init__(self, command, timeout=15):
         self.timeout = timeout
-        self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, start_new_session=True, bufsize=0)
+        self.child = Process(command, stdin=True)
+        self.proc = self.child.proc
         self.sel = selectors.DefaultSelector()
         self.sel.register(self.proc.stdout, selectors.EVENT_READ)
         self.buffer = b""
@@ -31,27 +26,35 @@ class Client:
             self.__exit__(None, None, None)
             raise
 
-    def send(self, message):
-        self.proc.stdin.write((json.dumps(message) + "\n").encode())
-        self.proc.stdin.flush()
+    def send(self, message, deadline=None):
+        self.child.write((json.dumps(message) + "\n").encode(),
+                         deadline if deadline is not None else time.monotonic()+self.timeout)
 
     def request(self, method, params):
         self.seq += 1
-        self.send({"jsonrpc": "2.0", "id": self.seq, "method": method, "params": params})
         deadline = time.monotonic() + self.timeout
-        total = 0
+        self.send({"jsonrpc": "2.0", "id": self.seq, "method": method, "params": params}, deadline)
+        total = len(self.buffer)
         while time.monotonic() < deadline:
+            if self.child.closed:
+                raise ProbeError("Probe owner is shutting down")
             while b"\n" in self.buffer:
                 line, self.buffer = self.buffer.split(b"\n", 1)
                 try:
                     message = json.loads(line)
                 except (ValueError, UnicodeError):
-                    continue
+                    raise ProbeError("Malformed MCP response") from None
+                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                    raise ProbeError("Invalid MCP response envelope")
                 if message.get("id") != self.seq:
                     continue
+                if type(message.get("id")) is not int or ("result" not in message and "error" not in message):
+                    raise ProbeError("Invalid MCP response envelope")
                 if "error" in message:
                     raise ProbeError("MCP request refused")
                 result = message.get("result", {})
+                if not isinstance(result, dict):
+                    raise ProbeError("Invalid MCP result")
                 if result.get("isError"):
                     raise ProbeError("MCP tool failed")
                 return result
@@ -59,11 +62,11 @@ class Client:
                 if self.proc.poll() is not None:
                     break
                 continue
-            chunk = os.read(self.proc.stdout.fileno(), 65536)
+            chunk = os.read(self.proc.stdout.fileno(), min(65536, LIMIT+1-total))
             if not chunk:
                 break
             total += len(chunk)
-            if total > 2 * 1024 * 1024:
+            if total > LIMIT:
                 raise ProbeError("MCP response exceeded limit")
             self.buffer += chunk
         raise ProbeError("MCP check timed out or disconnected")
@@ -72,15 +75,5 @@ class Client:
         return self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
     def __exit__(self, *_):
-        try:
-            os.killpg(self.proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            self.proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid, signal.SIGKILL)
-            self.proc.wait()
         self.sel.close()
-        for stream in (self.proc.stdin, self.proc.stdout):
-            stream.close()
+        self.child.close()

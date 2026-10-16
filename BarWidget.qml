@@ -89,6 +89,7 @@ Panel {
           foreground: root.foreground
           fontFamily: root.fontFamily
           serviceError: root.machineService ? root.machineService.serviceError : ""
+          onConfirmationClosed: if (root.opened) keys.forceActiveFocus()
           onActionRequested: function(action,confirmed) { if (action === "refresh") root.refresh(); else if (root.machineService) root.machineService.action(action,confirmed) }
           onSettingsChanged: function(values) { root.persist(values) }
           onSectionChanged: flick.contentY = 0

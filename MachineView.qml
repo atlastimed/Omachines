@@ -25,15 +25,22 @@ Column {
   signal actionRequested(string action, bool confirmed)
   signal settingsChanged(var values)
   signal revealItem(var item)
+  signal confirmationClosed()
   spacing: Style.space(12)
   onSectionChanged: { cursorIndex = 0; confirmation = "" }
   onCursorIndexChanged: Qt.callLater(function() { if (actionList.itemAt(cursorIndex)) root.revealItem(actionList.itemAt(cursorIndex)) })
-  onConfirmationChanged: if (confirmation) Qt.callLater(function() { cancelButton.forceActiveFocus(); root.revealItem(cancelButton) })
+  onConfirmationChanged: {
+    if (confirmation) Qt.callLater(function() {
+      if (root.confirmation && !root.busy) { cancelButton.forceActiveFocus(); root.revealItem(cancelButton) }
+    })
+    else { cancelButton.focus = false; confirmButton.focus = false; confirmationClosed() }
+  }
   onMachineChanged: {
     var count = section === "Settings" ? 3 : actions.length
     if (cursorIndex >= count) cursorIndex = Math.max(0, count - 1)
-    if (busy) confirmation = ""
+    if (machine.demo) confirmation = ""
   }
+  onBusyChanged: if (busy) confirmation = ""
 
   function reset() { confirmation = ""; cursorIndex = 0 }
   function moveCursor(dx, dy) {
@@ -231,6 +238,7 @@ Column {
   }
   Column {
     visible: root.confirmation !== ""
+    enabled: visible && !root.busy && !root.machine.demo
     width: parent.width
     spacing: Style.space(10)
     Text {
@@ -241,8 +249,8 @@ Column {
     }
     Row {
       spacing: Style.space(10)
-      Button { objectName: "confirm-action"; text: "Continue"; bordered: true; focusable: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: { var action = root.confirmation; root.confirmation = ""; root.actionRequested(action,true) } }
-      Button { id: cancelButton; objectName: "cancel-action"; text: "Cancel"; focusable: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.confirmation = "" }
+      Button { id: confirmButton; objectName: "confirm-action"; text: "Continue"; bordered: true; focusable: root.confirmation !== ""; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: { if (!root.confirmation || root.busy || root.machine.demo) return; var action = root.confirmation; root.confirmation = ""; root.actionRequested(action,true) } }
+      Button { id: cancelButton; objectName: "cancel-action"; text: "Cancel"; focusable: root.confirmation !== ""; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.confirmation = "" }
     }
   }
   Text {

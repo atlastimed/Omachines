@@ -37,4 +37,5 @@ Playwright is bundled with Codex and was already used to validate the design pre
 - [x] Physical desktop and approved VM lifecycle/backup validation.
 - [x] Documentation and local first-version validation complete.
 - [x] Public repository, privacy/secret checks and initial implementation PR.
-- [ ] Review the initial draft PR and address the agreed review round before merging.
+- [x] Assess the initial review and address R1–R7 in the agreed single fix round.
+- [ ] Merge decision after the fix-round checks and handoff.

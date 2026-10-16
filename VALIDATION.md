@@ -4,18 +4,25 @@
 
 `python3 scripts/check.py` passed on Omarchy 4.0.4:
 
-- 27 Python tests cover typed/unknown/stale state, operation reservations and locks,
+- 63 Python tests cover typed/unknown/stale state, operation reservations and locks,
   redacted diagnostics, backup evidence, installer preservation, release staging,
   and publication privacy heuristics.
-- 8 native Qt interaction cases inside the actual Quickshell runtime: navigation,
+- 13 native Qt interaction cases inside the actual Quickshell runtime: navigation,
   explicit confirmation/cancel, busy/demo states, optional Aside, keyboard settings,
-  and reactive light/dark theme tokens. The harness reports zero failures.
+  and reactive light/dark theme tokens. Actual key events cover Cancel, Continue,
+  Escape, automatic dismissal and queued focus changes. The harness reports zero
+  failures (14 passes including initialization).
 - Omarchy manifest validation and qmllint with zero warnings.
 
 GitHub Actions runs portable backend tests on Python 3.12 and 3.14, publication
 privacy heuristics, and a redacted Gitleaks scan of Git history. See the workflow
 run attached to each commit for its result. Native Omarchy checks remain a
 separate local requirement.
+
+The fix round reran these checks in isolated fixtures and offscreen Quickshell.
+Its subprocess, concurrency, installer and response regressions are mapped in
+[REVIEW-FIXES.md](REVIEW-FIXES.md). The physical desktop and real Windows results
+below describe the initial version, not a repeated live test of the fixes.
 
 ## Publication checks
 

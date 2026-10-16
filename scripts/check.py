@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix='omachines-qt-') as tmp:
     output=result.stdout+result.stderr
     print(output)
     matched=re.search(r'OMACHINES_TEST_RESULT (\d+) (\d+)',output)
-    if result.returncode or not matched or int(matched[1]) or int(matched[2])<7:
+    expected=len(re.findall(r'function test_', (ROOT/'tests/tst_panel.qml').read_text()))
+    if result.returncode or not matched or int(matched[1]) or int(matched[2])<expected:
         raise SystemExit('Native QML interaction tests failed or did not run')
 print('Checks passed')
