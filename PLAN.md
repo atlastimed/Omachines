@@ -36,4 +36,5 @@ Playwright is bundled with Codex and was already used to validate the design pre
 - [x] Automated checks and local installation.
 - [x] Physical desktop and approved VM lifecycle/backup validation.
 - [x] Documentation and local first-version validation complete.
-- [ ] Public repository, privacy/secret checks and initial implementation PR.
+- [x] Public repository, privacy/secret checks and initial implementation PR.
+- [ ] Review the initial draft PR and address the agreed review round before merging.

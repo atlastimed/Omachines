@@ -17,6 +17,21 @@ privacy heuristics, and a redacted Gitleaks scan of Git history. See the workflo
 run attached to each commit for its result. Native Omarchy checks remain a
 separate local requirement.
 
+## Publication checks
+
+Before the first public push, Gitleaks 8.30.1 scanned the exact staged tree and
+both initial commits with no findings. Privacy heuristics checked all 27 tracked
+files, and manual review removed a personal fixture name and private backup
+details. Commit identities use the public project alias and GitHub noreply email.
+No VM images, credentials, private configuration or desktop screenshots are
+included. These checks reduce accidental disclosure; they are not a guarantee.
+
+The initial [GitHub Actions run](https://github.com/atlastimed/Omachines/actions/runs/38959128102)
+passed Python 3.12 and 3.14 checks and the Git-history secret scan. The full
+implementation is in [draft PR #1](https://github.com/atlastimed/Omachines/pull/1),
+pending review before merging. GitHub secret scanning, push protection and
+private vulnerability reporting are enabled.
+
 ## Physical desktop
 
 - Real Hyprland panel observed and captured on the 1920×1080 display.

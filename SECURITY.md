@@ -26,8 +26,8 @@ Trust boundaries:
 
 ## Reporting a vulnerability
 
-Use this repository's private vulnerability reporting feature on GitHub when
-enabled. Do not put credentials, VM images, private configurations or sensitive
+Use [GitHub's private vulnerability report form](https://github.com/atlastimed/Omachines/security/advisories/new).
+Do not put credentials, VM images, private configurations or sensitive
 logs into public issues. The project is an early preview; response times are
 best effort.
 
