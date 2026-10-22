@@ -13,14 +13,23 @@ from core import (ROOT, OperationError, admission, backups, busy, check, collect
                   reservation_fresh, run, settings, state_dir, viewer_windows, wrapper, write_json)
 from mcp import Client
 
-ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics"}
-TERMINAL = {"start", "stop", "backup"}
-DISRUPTIVE = {"stop", "backup", "handoff"}
+ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections"}
+ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
+TERMINAL = {"start", "stop", "backup"} | ADMIN
+DISRUPTIVE = {"stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"}
 
 
 def record(action, status, message, **extra):
     value={"action":action,"status":status,"message":message,"updatedAt":now(),"pid":os.getpid(),**extra}
+    old=read_json(state_dir()/"operation.json",{})
+    if old.get('action')==action and old.get('status') in ('starting','running'):
+        for key in ('requestId','machineId','parameters'):
+            if key in old and key not in value:value[key]=old[key]
+    value.setdefault('machineId','windows')
     write_json(state_dir()/"operation.json",value)
+    if status in ('complete','failed'):
+        import history
+        history.append(value)
     return value
 
 
@@ -30,23 +39,31 @@ def notify(message, config):
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
-def request_action(action, config, confirmed=False):
+def request_action(action, config, confirmed=False, parameters=None):
     if action not in ACTIONS:
         raise OperationError("Unknown action")
     if config["demo"]:
         raise OperationError("Demo mode never controls a real VM")
     if action in DISRUPTIVE and not confirmed:
         raise OperationError("Confirm this action first")
+    from machines import selected
+    try: machine=selected()
+    except ValueError:raise OperationError("Machine configuration needs attention") from None
+    parameters=validate_parameters(action,parameters or {})
     # Reservation prevents two widgets from starting overlapping workers.
     with admission():
         if busy():
             raise OperationError("Another operation is still running")
+        previous=operation()
+        if previous.get('status')=='interrupted':
+            import history
+            history.append(previous)
         request_id = uuid.uuid4().hex
         started = time.time()
         argv=["/usr/bin/python3","-B",str(ROOT/"backend/omachinesctl"),"worker",action,
               "--request-id",request_id]
         record(action,"starting","Waiting for the operation to start",startedEpoch=started,
-               expiresEpoch=started+120,requestId=request_id)
+               expiresEpoch=started+120,requestId=request_id,machineId=machine["id"],parameters=parameters)
         try:
             if action in TERMINAL:
                 subprocess.Popen(["/usr/bin/omarchy-launch-terminal",*argv,"--interactive"],
@@ -71,7 +88,8 @@ def vm_priv(action):
 def write_diagnostics(config):
     state=collect(config,deep=True)
     # Strict output allowlist: no guest paths, IPs, account IDs, windows or raw logs.
-    report={"version":"0.1.0","checkedAt":state["checkedAt"],"state":state["state"],
+    from core import VERSION
+    report={"version":VERSION,"checkedAt":state["checkedAt"],"state":state["state"],
             "checks":state["checks"],"resources":state["resources"],"capabilities":state["capabilities"],
             "backupCount":len(state["backups"]),"operationStatus":operation().get("status")}
     folder=state_dir()/"reports"
@@ -145,11 +163,13 @@ def backup(config):
     return "Backup verified. Windows was started; its connections are not ready yet."
 
 
-def perform(action, config):
+def perform(action, config, parameters=None):
+    parameters=validate_parameters(action,parameters or {})
+    if action in ADMIN:return admin_action(action,parameters)
     if action=="open":
         windows=viewer_windows()
         if windows:
-            run(["hyprctl","dispatch","focuswindow","address:"+windows[0]],3)
+            run(["hyprctl","dispatch",'hl.dsp.focus({ window = "address:'+windows[0]+'" })'],3)
             return "Windows viewer focused"
         launcher=wrapper("windows-vm-launch")
         if not launcher:
@@ -163,6 +183,7 @@ def perform(action, config):
         vm_priv("down")
         return "Windows shut down"
     if action=="backup":
+        if Path("/usr/local/lib/omachines/admin.py").is_file():return admin_action(action,parameters)
         return backup(config)
     if action=="console":
         run(["/usr/bin/omarchy-launch-browser","http://127.0.0.1:8006"],8)
@@ -191,6 +212,32 @@ def perform(action, config):
         with Client([wrapper("windows-vm-mcp")],15) as client:
             client.call("launch_app",{"path":guest["asidePath"]})
         return "Aside opened in Windows"
+    if action=="label":
+        rows=backups(config)
+        target=next((r for r in rows if Path(r.get('path','')).name==parameters['backupId']),None)
+        if target is None:
+            from machines import admin_state
+            target=next((r for r in admin_state().get('backups',[]) if r.get('id')==parameters['backupId']),None)
+        if target is None:raise OperationError('Select a backup before naming it')
+        target={**target,'label':parameters['label']}
+        rows=[r for r in rows if r.get('path')!=target['path']]+[target]
+        write_json(state_dir()/'backups.json',rows)
+        return 'Backup name saved'
+    if action=="rehearsal-image":
+        from machines import admin_state
+        path=admin_state().get('rehearsal',{}).get('screenshot','')
+        if path!=f'/var/lib/omachines/users/{os.getuid()}/rehearsal.ppm' or not Path(path).is_file():raise OperationError('No rehearsal image is available')
+        subprocess.Popen(['xdg-open',path],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        return 'Rehearsal image opened; review the Windows boot before recording success'
+    if action=="connections":
+        from machines import selected
+        m=selected();folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
+        path=folder/'connections.txt'
+        text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(text)
+        subprocess.Popen(['xdg-open',str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        return 'Private connection instructions opened'
     if action=="diagnostics":
         path=write_diagnostics(config)
         subprocess.Popen(["xdg-open",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
@@ -213,6 +260,13 @@ def worker(action, request_id, interactive=False):
                         or not reservation_fresh(reservation)):
                     raise OperationError("This operation request expired or was superseded; request it again")
                 config=settings()
+                from machines import selected
+                try:
+                    if selected()['id']!=reservation.get('machineId','windows'):
+                        raise ValueError('Machine changed')
+                except ValueError:
+                    record(action,'failed','Machine configuration changed; request the action again')
+                    raise OperationError('Machine configuration changed; request the action again') from None
                 if config["demo"]:
                     record(action,"failed","Demo mode never controls a real VM")
                     raise OperationError("Demo mode never controls a real VM")
@@ -226,7 +280,7 @@ def worker(action, request_id, interactive=False):
                 print(str(error),flush=True)
             return 1
         try:
-            message=perform(action,config)
+            message=perform(action,config,reservation.get("parameters",{}))
             record(action,"complete",message)
             if action in TERMINAL or action=="diagnostics":
                 notify(message,config)
@@ -244,3 +298,44 @@ def worker(action, request_id, interactive=False):
                 except EOFError:
                     pass
             return 1
+
+
+def validate_parameters(action, values):
+    if not isinstance(values,dict):raise OperationError('Invalid action parameters')
+    result={}
+    if action in ('verify','rehearse','restore','label'):
+        name=values.get('backupId','')
+        if not isinstance(name,str) or not re.fullmatch(r'(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?',name):raise OperationError('Select a backup first')
+        result['backupId']=name
+    if action=='label':
+        label=values.get('label','')
+        if not isinstance(label,str) or not 1<=len(label.strip())<=60 or any(ord(c)<32 for c in label):raise OperationError('Use a name of 1–60 characters')
+        result['label']=label.strip()
+    if action=='allocate':
+        for key in ('cpu','ram'):
+            if type(values.get(key))!=int or not 1<=values[key]<=256:raise OperationError('Enter valid CPU and RAM allocations')
+            result[key]=values[key]
+    if set(values)-set(result):raise OperationError('Unexpected action parameters')
+    return result
+
+
+def admin_action(action,parameters):
+    helper=Path('/usr/local/lib/omachines/admin.py')
+    if not helper.is_file() or helper.is_symlink() or helper.stat().st_uid!=0 or helper.stat().st_mode&0o022:raise OperationError('Install the Omachines administrator helper first')
+    args=['sudo','/usr/bin/python3','-I',str(helper),action]
+    for key,flag in (('backupId','--backup-id'),('cpu','--cpu'),('ram','--ram')):
+        if key in parameters:args += [flag,str(parameters[key])]
+    # Keep stdin attached to the visible operation terminal for sudo and restore
+    # confirmation. Output contains only administrator-helper stage summaries.
+    p=subprocess.Popen(args,stdout=subprocess.PIPE,text=True,bufsize=1)
+    messages=[]
+    for line in p.stdout:
+        print(line,end='',flush=True)
+        line=line.strip()
+        if line.startswith('OMACHINES_STAGE:'):
+            stage=line.partition(':')[2]
+            record(action,'running',{'preflight':'Checking configuration and capacity','stopping':'Stopping Windows','copying':'Copying Windows storage','verifying':'Checking backup integrity','restoring':'Restoring into a separate directory','booting':'Booting the offline restored copy','starting':'Starting Windows','complete':'Operation finishing'}.get(stage,'Operation in progress'))
+        elif line:messages.append(line[:300]);messages=messages[-3:]
+    p.wait()
+    if p.returncode:raise OperationError(messages[-1] if messages else 'Administrator operation failed or authentication was cancelled')
+    return messages[-1] if messages else 'Administrator operation complete'

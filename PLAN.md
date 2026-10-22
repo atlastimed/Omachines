@@ -38,4 +38,4 @@ Playwright is bundled with Codex and was already used to validate the design pre
 - [x] Documentation and local first-version validation complete.
 - [x] Public repository, privacy/secret checks and initial implementation PR.
 - [x] Assess the initial review and address R1–R7 in the agreed single fix round.
-- [ ] Merge decision after the fix-round checks and handoff.
+- [x] PR #1 merged and installed; see the separate v0.2 plan for current work.

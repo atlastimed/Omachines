@@ -22,7 +22,7 @@ Item {
     send({cmd: "configure", settings: value})
   }
   function refresh() { send({cmd: "refresh"}) }
-  function action(name, confirmed) { send({cmd: "action", action: name, confirmed: confirmed === true}) }
+  function action(name, confirmed, parameters) { send({cmd: "action", action: name, confirmed: confirmed === true, parameters: parameters || {}}) }
 
   Process {
     id: daemon
@@ -31,7 +31,7 @@ Item {
     stdout: SplitParser {
       onRead: function(data) {
         try {
-          var result = JSON.parse(data)
+          const result = JSON.parse(data)
           if (typeof result !== "object" || !result.state) return
           root.snapshot = result
           root.connected = true

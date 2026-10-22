@@ -42,3 +42,29 @@ CI runs Gitleaks against Git history with redacted findings, plus a small
 repository privacy check for accidental personal home paths, email addresses
 and private artifacts. Neither automated checks nor a manual review prove the
 absence of all secrets or identifying information.
+
+## Version 0.2 recovery boundary
+
+The optional administrator helper is installed separately, root-owned, and invoked
+with Python isolated mode. Its runtime does not import project code. It uses fixed
+system executable paths, filtered command environments and an action allowlist.
+It verifies root-owned ancestors, protected storage identity and authenticated user
+identity. No sudoers or polkit rules are added. Helper installation itself is an
+explicit code-trust decision; a compromised checkout must not be installed as root.
+
+Backups in a user-writable parent are accessed through pinned directory/file
+descriptors. New writes remain in a pinned private staging directory. Verification
+requires a protected root-owned archive and checksum, hashes the pinned file, and
+rejects traversal, links, devices, duplicate entries and incomplete disk/firmware/
+TPM state. Sparse extents drive capacity estimates. Extraction uses a separate
+root-protected staging directory; existing storage is retained during replacement.
+The journal supports retrying an interrupted rollback. Production filesystem swaps
+have fixture coverage; a disposable boot is distinct from testing replacement of
+the user's production storage.
+
+Rehearsal uses the locally installed image with no network, published ports or host
+shares. It exposes only KVM and the copied storage to the container. A private QMP
+screenshot supports explicit boot review; there is no host-accessible QMP listener.
+The clone still contains credentials from the backup and is retained privately.
+This is isolation for a restore test, not a sandbox guarantee against a hostile
+kernel/hypervisor exploit. Guest code is never trusted as a host command source.

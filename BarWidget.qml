@@ -2,12 +2,13 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
 Panel {
   id: root
-  readonly property var popupTokens: Color.popups
+  readonly property var popupTokens: Commons.Color.popups
   readonly property var fontTokens: Style.font
   readonly property var spacingTokens: Style.spacing
   moduleName: "atlastimed.omachines"
@@ -27,8 +28,8 @@ Panel {
   function configure() { if (machineService) machineService.configure(config) }
   function persist(values) {
     var entry = {id:moduleName}
-    for (var key in settings) if (key !== "id") entry[key] = settings[key]
-    for (var changed in values) entry[changed] = values[changed]
+    for (let key in settings) if (key !== "id") entry[key] = settings[key]
+    for (let changed in values) entry[changed] = values[changed]
     settings = entry
     if (hostBar && hostBar.shell && typeof hostBar.shell.updateEntryInline === "function") hostBar.shell.updateEntryInline(moduleName,entry)
   }
@@ -64,12 +65,12 @@ Panel {
       id: keys
       anchors.fill: parent
       // Native buttons keep Tab/Enter while a confirmation has focus.
-      blocked: view.confirmation !== ""
+      blocked: view.confirmation !== "" || view.editing
       onCloseRequested: root.close()
       onMoveRequested: function(dx,dy) { view.moveCursor(dx,dy) }
       onActivateRequested: view.activate()
       onTextKey: function(key) { view.textKey(key) }
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) { if (view.section === "Backups" || view.section === "Settings") view.focusEditor(); else root.switchPanel(direction) }
       Keys.onEscapePressed: { if (view.confirmation) view.confirmation = ""; else root.close() }
       Flickable {
         id: flick
@@ -90,7 +91,7 @@ Panel {
           fontFamily: root.fontFamily
           serviceError: root.machineService ? root.machineService.serviceError : ""
           onConfirmationClosed: if (root.opened) keys.forceActiveFocus()
-          onActionRequested: function(action,confirmed) { if (action === "refresh") root.refresh(); else if (root.machineService) root.machineService.action(action,confirmed) }
+          onActionRequested: function(action,confirmed,parameters) { if (action === "refresh") root.refresh(); else if (root.machineService) root.machineService.action(action,confirmed,parameters) }
           onSettingsChanged: function(values) { root.persist(values) }
           onSectionChanged: flick.contentY = 0
           onRevealItem: function(item) {
