@@ -51,3 +51,17 @@ class NewStateTests(unittest.TestCase):
         path=core.state_dir()/'machines.json';path.write_text('{bad json')
         with self.assertRaises(ValueError):machines.initialize()
         self.assertEqual(path.read_text(),'{bad json')
+
+    def test_missing_ssh_does_not_spawn_a_cli_probe(self):
+        with patch('core.wrapper',return_value=None),patch('core.run') as run:
+            with self.assertRaises(core.OperationError):core.aside_cli_status()
+            run.assert_not_called()
+
+    def test_disconnected_vm_clears_old_aside_cli_readiness(self):
+        previous={'checks':{'asideCli':{'status':'ready'},'asideAuth':{'status':'signed-in'}}}
+        offline={'state':'unreachable','checks':{'ssh':{'status':'offline'}},'capabilities':{},'backups':[]}
+        with patch('core.collect_windows',return_value=offline),patch('core.aside_cli_status') as probe:
+            result=core.collect(core.settings(),previous=previous)
+            probe.assert_not_called()
+        self.assertEqual(result['checks']['asideCli']['status'],'unknown')
+        self.assertEqual(result['checks']['asideAuth']['status'],'unknown')

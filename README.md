@@ -18,7 +18,7 @@ connections. The existing viewer wrapper determines what happens when it closes.
 - **Backups:** name a backup, see size and verification time, recheck integrity,
   test an offline restored copy, or deliberately restore Windows.
 - **Settings:** CPU/RAM allocation, Aside integration, notifications, check interval
-  and recent operation history.
+  and recent panel operation history.
 
 Arrows navigate; Enter activates; 1–4 select a section; R checks connections;
 Escape closes. Tab enters the backup or resource form, where normal editing keys

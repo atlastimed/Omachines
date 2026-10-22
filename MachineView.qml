@@ -32,6 +32,7 @@ Column {
   signal settingsChanged(var values)
   signal revealItem(var item)
   signal confirmationClosed()
+  onFocusedItemChanged: if (focusedItem && ownsFormFocus(focusedItem)) root.revealItem(focusedItem)
   spacing: Style.space(12)
   onSectionChanged: { cursorIndex = 0; confirmation = "" }
   onCursorIndexChanged: Qt.callLater(function() { if (actionList.itemAt(cursorIndex)) root.revealItem(actionList.itemAt(cursorIndex)) })

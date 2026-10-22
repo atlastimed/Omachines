@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-On Omarchy 4.0.6, `python3 scripts/check.py` passed with 87 Python tests, manifest
+On Omarchy 4.0.6, `python3 scripts/check.py` passed with 89 Python tests, manifest
 validation, zero-warning qmllint, and 17 native Qt interaction cases (18 passes
 including initialization). Cases exercise actual key events in the installed
 Quickshell runtime; this is separate from the physical desktop evidence below.
@@ -54,5 +54,21 @@ This proves boot recovery for that copied disk/TPM/firmware combination; it does
 not prove every application or a production storage swap. The original storage
 was not replaced. Copies and incomplete work remain private and outside Git.
 
-Final resource/recovery checks and publication scan results will be recorded below
-before the version is marked ready.
+The original guest completed a real allocation round trip from 4 to 6 to 4 CPUs;
+each value was queried inside Windows after restart. RAM remained 8 GiB. Docker
+inspection confirmed the rehearsal container used network mode `none`, no port
+bindings, only its copied `/storage` mount and no privileged mode. The reviewed
+copy was stopped; the original guest remained available.
+
+## Publication and self-review
+
+The staged publication tree and Git history passed Gitleaks 8.30.1 with redacted
+output. Privacy heuristics passed for all tracked files; private review notes,
+VM images, credentials, operational evidence and real desktop screenshots remain
+outside publication. Manual review tightened directory pinning, restore/rollback
+journals, immutable request parameters, stale readiness and editor draft handling.
+
+Initial CI exposed a new Aside probe escaping a mocked response fixture. It was
+isolated, external commands are now forbidden in that fixture, and missing-bridge
+and disconnected-state regressions were added. Current CI results are attached to
+PR #2; the initial failing run is not treated as successful validation.

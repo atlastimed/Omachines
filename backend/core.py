@@ -382,6 +382,15 @@ def collect_windows(config, deep=False, previous=None):
     return s
 
 
+def aside_cli_status():
+    ssh=wrapper('windows-vm-ssh')
+    if not ssh:
+        raise OperationError('Windows SSH connection is missing')
+    code=(ROOT/'backend/aside-cli.ps1').read_text()
+    encoded=base64.b64encode(code.encode('utf-16-le')).decode()
+    return json.loads(run([ssh,f'powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}'],15))
+
+
 def collect(config, deep=False, previous=None):
     import machines
     import history
@@ -408,10 +417,7 @@ def collect(config, deep=False, previous=None):
     state['backups']=sorted(found.values(),key=lambda r:r.get('createdAt',''),reverse=True)[:30]
     if deep and state['checks'].get('ssh',{}).get('status')=='ready' and config['asideEnabled']:
         try:
-            code=(ROOT/'backend/aside-cli.ps1').read_text()
-            # Invoke the script block with its default status mode.
-            encoded=base64.b64encode(code.encode('utf-16-le')).decode()
-            result=json.loads(run([wrapper('windows-vm-ssh'),f'powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}'],15))
+            result=aside_cli_status()
             if not isinstance(result,dict):raise ValueError()
             version=result.get('version','')
             version=version if isinstance(version,str) and re.fullmatch(r'[0-9.]{1,40}',version) else 'unknown version'
