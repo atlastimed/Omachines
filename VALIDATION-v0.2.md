@@ -72,3 +72,27 @@ Initial CI exposed a new Aside probe escaping a mocked response fixture. It was
 isolated, external commands are now forbidden in that fixture, and missing-bridge
 and disconnected-state regressions were added. Current CI results are attached to
 PR #2; the initial failing run is not treated as successful validation.
+
+
+## Final acceptance
+
+All three physical monitors showed the updated native panel. The smaller 1080p
+display scrolled the backup actions into view through keyboard navigation. The
+normal Windows viewer opened and a second Open action focused the existing viewer.
+The normal administrator action worker completed a catalogue refresh and recorded
+its completion in history. No Hyprland configuration errors were reported.
+
+After the final restarts, Windows reported 4 CPUs and approximately 7.9 GiB usable
+RAM (8 GiB configured). SSH, interactive desktop, Cua and Aside browser tools were
+ready; the CLI version check was ready and its account was signed in. Model access
+and usage were deliberately not exercised.
+
+Exactly one backend served all monitors. A 61-second sample measured 0.03 CPU
+seconds (about 0.049% of one core) and 21,204 KiB RSS. This measures the Python
+backend, not the full shell, transient probes, Windows or the hypervisor.
+
+The final GitHub checks must be read at the PR's current head: Python 3.12,
+Python 3.14 and the Git-history secret scan. The initial failed test-isolation run
+was superseded by passing checks. All publication files passed the privacy scan.
+The real baseline backups, the newly verified backup, the stopped rehearsal copy
+and the failed attempt's incomplete archive were retained; none are published.

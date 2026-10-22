@@ -28,9 +28,9 @@ The existing Windows guest, credentials, signed-in browser and backups are prese
 - [x] Native forms, keyboard focus/confirmation, constrained sizing and theme checks.
 - [x] Unit/integration tests for privilege boundaries, restore paths, interruption,
       stale requests and registry/history migration; complete existing checks.
-- [ ] Live update, physical panel checks, authorized lifecycle/resource checks and
+- [x] Live update, physical panel checks, authorized lifecycle/resource checks and
       offline restore rehearsal, followed by healthy original Windows guest.
-- [ ] Self-review, secret/PII scan and GitHub PR with validation limits.
+- [x] Self-review, secret/PII scan and GitHub PR with validation limits.
 
 The user authorized Windows/Aside restarts during this work on 22 October 2026.
 Restoring over the active VM is a distinct destructive operation and is not needed
