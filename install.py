@@ -17,8 +17,8 @@ ID = "atlastimed.omachines"
 DOCS = ("README.md", "LICENSE", "INTEGRATION.md", "SECURITY.md",
         "CONTRIBUTING.md", "VALIDATION.md", "REVIEW-FIXES.md")
 FILES = ("manifest.json", "BarWidget.qml", "MachineView.qml", "StatusRow.qml",
-         "Service.qml", "Model.js", *DOCS)
-BACKEND = ("core.py", "operations.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1")
+         "Service.qml", "Model.js", "BackupControls.qml", "ResourceControls.qml", *DOCS)
+BACKEND = ("core.py", "operations.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1")
 
 
 def run(*args):
@@ -167,8 +167,10 @@ def main(argv=None):
     parser.add_argument("--setup-workspace", type=Path)
     args = parser.parse_args(argv)
     sys.path.insert(0, str(ROOT/"backend"))
+    from machines import initialize
     from core import maintenance
     with maintenance():
+        initialize()
         install(args)
 
 

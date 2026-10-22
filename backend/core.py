@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ID = "atlastimed.omachines"
 
 
@@ -301,7 +301,7 @@ def sample_state():
             "operation":{},"demo":True,"viewerOpen":False,"storage":{"availableBytes":107374182400},"sharedPath":"~/Windows"}
 
 
-def collect(config, deep=False, previous=None):
+def collect_windows(config, deep=False, previous=None):
     if config["demo"]:
         return sample_state()
     caps = capabilities(config)
@@ -329,7 +329,7 @@ def collect(config, deep=False, previous=None):
     if not deep:
         if previous:
             s["error"] = previous.get("error", "")
-            s["checks"] = previous.get("checks", {})
+            s["checks"] = dict(previous.get("checks", {}))
             s["resources"] = previous.get("resources", {})
             s["guest"] = previous.get("guest", {})
             if s["error"]:
@@ -380,3 +380,58 @@ def collect(config, deep=False, previous=None):
             except (OSError, ProbeError, BrokenPipeError):
                 s["checks"]["aside"]=check("error","Browser is open; its tools did not respond")
     return s
+
+
+def collect(config, deep=False, previous=None):
+    import machines
+    import history
+    if config.get("demo"):
+        state=sample_state()
+        state.update(host={"cpu":16,"memoryBytes":32*1024**3,"availableBytes":16*1024**3},history=[],machineId="windows")
+        return state
+    try:
+        machine=machines.selected()
+    except ValueError:
+        return {"state":"unknown","summary":"Machine configuration needs attention","error":"Unsupported machine registry; no connections attempted","checks":{},"capabilities":{},"resources":{},"operation":operation(),"backups":[]}
+    state=collect_windows(config,deep,previous)
+    admin=machines.admin_state()
+    state.update(name=machine['name'],machineId=machine['id'],machines=[{"id":machine['id'],"name":machine['name'],"provider":machine['provider']}],host=machines.host_resources(),allocation=admin.get('allocation',{}),rehearsal=admin.get('rehearsal',{}),recovery=admin.get('recovery',{}),history=list(reversed(history.entries()))[:20])
+    helper=Path('/usr/local/lib/omachines/admin.py')
+    ready=helper.is_file() and not helper.is_symlink() and helper.stat().st_uid==0 and not helper.stat().st_mode&0o022
+    state['capabilities'].update(admin=ready,backup=ready or state['capabilities'].get('backup',False))
+    # Preserve user labels while administrative evidence supersedes imported status.
+    found={Path(r['path']).name:r for r in state['backups'] if r.get('path')}
+    for r in admin.get('backups',[]):
+        if not isinstance(r,dict) or not isinstance(r.get('id'),str):continue
+        old=found.get(r['id'],{})
+        found[r['id']]={**old,**r,'label':old.get('label','Windows backup')}
+    state['backups']=sorted(found.values(),key=lambda r:r.get('createdAt',''),reverse=True)[:30]
+    if deep and state['checks'].get('ssh',{}).get('status')=='ready' and config['asideEnabled']:
+        try:
+            code=(ROOT/'backend/aside-cli.ps1').read_text()
+            # Invoke the script block with its default status mode.
+            encoded=base64.b64encode(code.encode('utf-16-le')).decode()
+            result=json.loads(run([wrapper('windows-vm-ssh'),f'powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}'],15))
+            if not isinstance(result,dict):raise ValueError()
+            version=result.get('version','')
+            version=version if isinstance(version,str) and re.fullmatch(r'[0-9.]{1,40}',version) else 'unknown version'
+            installed=result.get('installed') is True
+            state['checks']['asideCli']=check('ready' if installed else 'missing','Aside CLI '+version if installed else 'Install or repair the CLI in Aside Developer settings')
+            auth=result.get('authentication')
+            state['checks']['asideAuth']=check(auth if auth in ('signed-in','signed-out') else 'unknown',{'signed-in':'CLI account signed in; model access not exercised','signed-out':'Sign in through Aside Developer settings'}.get(auth,'Account status could not be determined'))
+        except (ValueError,OSError,OperationError):
+            state['checks']['asideCli']=check('error','CLI check failed; repair or update Aside CLI')
+            state['checks']['asideAuth']=check('unknown','Authentication not checked')
+    elif not config['asideEnabled']:
+        for key in ('asideCli','asideAuth'):
+            state['checks'][key]=check('disabled','Aside integration is disabled')
+    elif not deep and previous and state.get('error'):
+        for key in ('asideCli','asideAuth'):
+            state['checks'][key]=check('error','Connection checks failed; refresh to retry')
+    elif not deep and previous and state['checks'].get('ssh',{}).get('status')=='ready':
+        for key in ('asideCli','asideAuth'):
+            if key in previous.get('checks',{}):state['checks'][key]=previous['checks'][key]
+    else:
+        for key in ('asideCli','asideAuth'):
+            state['checks'][key]=check('unknown','Windows command access is needed to check Aside CLI')
+    return state

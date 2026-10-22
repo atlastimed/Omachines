@@ -147,7 +147,7 @@ class CoreTests(unittest.TestCase):
     def test_focus_existing_viewer_no_duplicate(self):
         with patch('operations.viewer_windows',return_value=['0x123']),patch('operations.run') as run,patch('operations.subprocess.Popen') as launch:
             operations.perform('open',{})
-        run.assert_called_once_with(['hyprctl','dispatch','focuswindow','address:0x123'],3)
+        run.assert_called_once_with(['hyprctl','dispatch','hl.dsp.focus({ window = "address:0x123" })'],3)
         launch.assert_not_called()
 
     def test_diagnostic_excludes_private_fields(self):

@@ -1,12 +1,13 @@
 pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
 Column {
   id: root
-  readonly property var popupTokens: Color.popups
+  readonly property var popupTokens: Commons.Color.popups
   readonly property var fontTokens: Style.font
   readonly property var spacingTokens: Style.spacing
   property var machine: ({checks:{}, resources:{}, capabilities:{}, operation:{}, backups:[]})
@@ -14,6 +15,11 @@ Column {
   property string section: "Overview"
   property int cursorIndex: 0
   property string confirmation: ""
+  property var confirmationParameters: ({})
+  readonly property var focusedItem: Window.window ? Window.window.activeFocusItem : null
+  readonly property bool editing: backupControls.editing || resourceControls.editing || ownsFormFocus(focusedItem)
+  function ownsFormFocus(item) { while (item) { if (item === backupControls || item === resourceControls) return true; item=item.parent } return false }
+  function focusEditor() { if (section === "Backups") backupControls.focusEntry(); else if (section === "Settings") resourceControls.focusEntry() }
   property string serviceError: ""
   property real clock: Date.now()
   property color foreground: root.popupTokens.text
@@ -22,7 +28,7 @@ Column {
   readonly property var actions: Model.actionRows(section, machine, config.asideEnabled !== false)
   readonly property bool busy: Model.active(machine)
   readonly property var op: machine.operation || ({})
-  signal actionRequested(string action, bool confirmed)
+  signal actionRequested(string action, bool confirmed, var parameters)
   signal settingsChanged(var values)
   signal revealItem(var item)
   signal confirmationClosed()
@@ -42,7 +48,7 @@ Column {
   }
   onBusyChanged: if (busy) confirmation = ""
 
-  function reset() { confirmation = ""; cursorIndex = 0 }
+  function reset() { confirmation = ""; cursorIndex = 0; backupControls.resetDraft(); resourceControls.resetDraft() }
   function moveCursor(dx, dy) {
     if (confirmation !== "") return
     if (dx) section = sections[(sections.indexOf(section) + dx + sections.length) % sections.length]
@@ -56,7 +62,7 @@ Column {
     if (section === "Settings") {
       if (cursorIndex === 0) settingsChanged({asideEnabled: config.asideEnabled === false})
       else if (cursorIndex === 1) settingsChanged({notify: config.notify === false})
-      else { var choices=[60,120,300]; settingsChanged({pollSeconds:choices[(choices.indexOf(Number(config.pollSeconds || 120))+1)%3]}) }
+      else { let choices=[60,120,300]; settingsChanged({pollSeconds:choices[(choices.indexOf(Number(config.pollSeconds || 120))+1)%3]}) }
       return
     }
     if (!actions.length) return
@@ -64,17 +70,17 @@ Column {
   }
   function choose(row) {
     if (!row.enabled || busy || machine.demo) return
-    if (["stop", "backup", "handoff"].indexOf(row.action) >= 0) confirmation = row.action
-    else actionRequested(row.action, false)
+    if (["stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"].indexOf(row.action) >= 0) { confirmationParameters=JSON.parse(JSON.stringify(row.parameters || {})); confirmation = row.action }
+    else actionRequested(row.action, false, row.parameters || {})
   }
   function textKey(key) {
-    if (key === "r") actionRequested("refresh", false)
+    if (key === "r") actionRequested("refresh", false, {})
     if (["1","2","3","4"].indexOf(key) >= 0) section = sections[Number(key) - 1]
   }
 
   PanelHero {
     width: parent.width
-    title: "Windows 11"
+    title: root.machine.name || "Windows 11"
     meta: Model.resourceLine(root.machine)
     foreground: root.foreground
     fontFamily: root.fontFamily
@@ -105,7 +111,7 @@ Column {
     visible: text !== ""
     textFormat: Text.PlainText
     text: root.serviceError || root.machine.error || ""
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: root.fontFamily
     font.pixelSize: root.fontTokens.bodySmall
     wrapMode: Text.WordWrap
@@ -115,7 +121,7 @@ Column {
     visible: !!root.op.message
     textFormat: Text.PlainText
     text: (root.busy ? "In progress: " : "") + (root.op.message || "")
-    color: root.op.status === "failed" || root.op.status === "interrupted" ? Color.urgent : root.foreground
+    color: root.op.status === "failed" || root.op.status === "interrupted" ? Commons.Color.urgent : root.foreground
     font.family: root.fontFamily
     font.pixelSize: root.fontTokens.bodySmall
     wrapMode: Text.WordWrap
@@ -131,7 +137,7 @@ Column {
     Text {
       width: parent.width; textFormat: Text.PlainText
       text: "Closing the viewer keeps Windows running. Connection readiness does not indicate whether an agent is working."
-      color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+      color: Commons.Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
     }
   }
   Column {
@@ -139,11 +145,11 @@ Column {
     width: parent.width
     spacing: Style.space(12)
     Repeater {
-      model: root.config.asideEnabled !== false ? ["ssh","desktop","cua","aside"] : ["ssh","desktop","cua"]
+      model: root.config.asideEnabled !== false ? ["ssh","desktop","cua","aside","asideCli","asideAuth"] : ["ssh","desktop","cua"]
       StatusRow {
         required property string modelData
         width: parent.width
-        label: ({ssh:"Commands",desktop:"Desktop",cua:"Cua tools",aside:"Aside tools"})[modelData]
+        label: ({ssh:"Commands",desktop:"Desktop",cua:"Cua tools",aside:"Aside tools",asideCli:"Aside CLI",asideAuth:"Aside account"})[modelData]
         value: Model.checked(root.machine,modelData).message
         detail: Model.ago(Model.checked(root.machine,modelData).checkedAt,root.clock)
         foreground: root.foreground; fontFamily: root.fontFamily
@@ -152,30 +158,23 @@ Column {
     Text {
       width: parent.width; textFormat: Text.PlainText
       text: "Agents use the Windows desktop and can access its signed-in accounts. Aside model authentication and usage are not checked here."
-      color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+      color: Commons.Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
     }
   }
   Column {
     visible: root.section === "Backups"
     width: parent.width
     spacing: Style.space(12)
-    Repeater {
-      model: root.machine.backups || []
-      StatusRow {
-        required property var modelData
-        width: parent.width
-        label: modelData.label || "Windows backup"
-        value: (modelData.verified ? "Verified" : "Not verified") + " · " + new Date(modelData.createdAt).toLocaleString(Qt.locale(),Locale.ShortFormat)
-        detail: (modelData.verificationSource || "") + "\nRestore not rehearsed"
-        foreground: root.foreground; fontFamily: root.fontFamily
-      }
-    }
-    Text {
-      width: parent.width; textFormat: Text.PlainText
-      text: (root.machine.backups || []).length ? "Complete backups include the disk, TPM, firmware and private VM settings. Shared files are separate. Existing backups are preserved." : "No backup completion records found. Configure the Windows setup workspace to connect your existing backup workflow."
-      color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+    BackupControls {
+      id: backupControls
+      width:parent.width
+      machine:root.machine;foreground:root.foreground;fontFamily:root.fontFamily
+      visible:root.confirmation === ""
+      onRequest:function(action,parameters){root.choose({action:action,enabled:true,parameters:parameters})}
+      onEditingFinished:root.confirmationClosed()
     }
   }
+
   Column {
     visible: root.section === "Settings"
     width: parent.width
@@ -191,8 +190,34 @@ Column {
     }
     Text {
       width: parent.width; textFormat: Text.PlainText
-      text: "More options are in Omarchy’s bar widget settings. CPU/memory editing and restoration are planned for a later release."
-      color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+      text: "More options are in Omarchy’s bar widget settings. Resource changes require administrator approval and may restart Windows."
+      color: Commons.Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+    }
+  }
+
+  ResourceControls {
+    id: resourceControls
+    width:parent.width
+    visible:root.section === "Settings" && root.confirmation === ""
+    machine:root.machine;foreground:root.foreground;fontFamily:root.fontFamily
+    onRequest:function(action,parameters){root.choose({action:action,enabled:true,parameters:parameters})}
+    onEditingFinished:root.confirmationClosed()
+  }
+  Column {
+    width:parent.width
+    visible:root.section === "Settings" && root.confirmation === ""
+    spacing:root.spacingTokens.controlGap
+    Text { text:"Recent operations";color:root.foreground;font.family:root.fontFamily;font.pixelSize:root.fontTokens.subtitle;font.bold:true }
+    Text { visible:!(root.machine.history || []).length;text:"No operations recorded yet";color:Commons.Color.muted;font.family:root.fontFamily;font.pixelSize:root.fontTokens.bodySmall }
+    Repeater {
+      model:root.machine.history || []
+      StatusRow {
+        required property var modelData
+        width:parent.width;foreground:root.foreground;fontFamily:root.fontFamily
+        label:modelData.action+" · "+modelData.status
+        value:modelData.message || ""
+        detail:new Date(modelData.updatedAt).toLocaleString()
+      }
     }
   }
 
@@ -230,7 +255,7 @@ Column {
           Column {
             width: parent.width - parent.children[0].width - parent.spacing
             Text { width: parent.width; text: row.modelData.label; textFormat: Text.PlainText; color: root.foreground; font.family: root.fontFamily; font.pixelSize: root.fontTokens.body; wrapMode: Text.WordWrap }
-            Text { width: parent.width; text: row.modelData.detail; textFormat: Text.PlainText; color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap }
+            Text { width: parent.width; text: row.modelData.detail; textFormat: Text.PlainText; color: Commons.Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap }
           }
         }
       }
@@ -244,18 +269,24 @@ Column {
     Text {
       objectName: "confirmation-text"
       width: parent.width; textFormat: Text.PlainText
-      text: root.confirmation === "backup" ? "Close or save your Windows work first. This will shut down Windows, copy and verify its complete state, then start it again. A terminal asks for your Omarchy password." : root.confirmation === "stop" ? "Shut down Windows? Save your work first. Windows apps and agent tasks will stop." : "Return a disconnected Windows session to its console? This may change where the desktop is displayed. It will not unlock a locked session."
+      text: root.confirmation === "allocate" ? "Apply "+root.confirmationParameters.cpu+" CPUs and "+root.confirmationParameters.ram+" GiB RAM? Running Windows apps will close. Windows restarts if it was running. A terminal asks for your Omarchy password." :
+        root.confirmation === "rehearse" ? "Test backup "+root.confirmationParameters.backupId+" in a separate offline VM using 4 GiB RAM? The original Windows VM is preserved. Review the captured boot screen before recording success. Temporary files remain for inspection." :
+        root.confirmation === "rollback" ? "Return Windows to the storage retained before restoration? Windows will stop. The terminal asks you to confirm; the replaced storage is also retained." :
+        root.confirmation === "restore" ? "Restore backup "+root.confirmationParameters.backupId+"? Windows will stop. The disk, TPM and firmware are replaced with this backup; current storage is retained for recovery. The terminal verifies space and integrity and asks you to type the backup identity before replacement." :
+        root.confirmation === "rehearsal-pass" ? "Have you opened the rehearsal image and confirmed that the restored Windows copy reached its desktop or sign-in screen? This records your review and stops only the disposable VM." :
+        root.confirmation === "rehearsal-fail" ? "Record that the offline boot failed and stop the disposable VM? Its files remain for inspection." :
+        root.confirmation === "backup" ? "Close or save your Windows work first. This will shut down Windows, copy and verify its complete state, then start it again. A terminal asks for your Omarchy password." : root.confirmation === "stop" ? "Shut down Windows? Save your work first. Windows apps and agent tasks will stop." : "Return a disconnected Windows session to its console? This may change where the desktop is displayed. It will not unlock a locked session."
       color: root.foreground; font.family: root.fontFamily; font.pixelSize: root.fontTokens.body; wrapMode: Text.WordWrap
     }
     Row {
       spacing: Style.space(10)
-      Button { id: confirmButton; objectName: "confirm-action"; text: "Continue"; bordered: true; focusable: root.confirmation !== ""; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: { if (!root.confirmation || root.busy || root.machine.demo) return; var action = root.confirmation; root.confirmation = ""; root.actionRequested(action,true) } }
+      Button { id: confirmButton; objectName: "confirm-action"; text: "Continue"; bordered: true; focusable: root.confirmation !== ""; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: { if (!root.confirmation || root.busy || root.machine.demo) return; var action = root.confirmation; var parameters=root.confirmationParameters; root.confirmation = ""; root.actionRequested(action,true,parameters) } }
       Button { id: cancelButton; objectName: "cancel-action"; text: "Cancel"; focusable: root.confirmation !== ""; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.confirmation = "" }
     }
   }
   Text {
     width: parent.width; textFormat: Text.PlainText
-    text: "← → sections · ↑ ↓ actions · Enter select · R check · Esc close"
-    color: Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+    text: "← → sections · ↑ ↓ actions · Enter select · Tab forms · R check · Esc close"
+    color: Commons.Color.muted; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
   }
 }

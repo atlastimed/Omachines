@@ -26,9 +26,12 @@ function actionRows(tab, state, aside) {
     rows.push({action:"refresh",label:"Check connections",detail:"Check commands, desktop tools and Aside",icon:"󰑐",enabled:true})
     rows.push({action:"handoff",label:"Return desktop to console…",detail:"Recover a disconnected agent desktop",icon:"󰑓",enabled:!!caps.ssh && running})
     rows.push({action:"console",label:"Open recovery console",detail:"Use if the normal viewer cannot connect",icon:"󰆍",enabled:true})
+    rows.push({action:"connections",label:"Agent connection guide",detail:"Existing command and MCP connections; no credentials",icon:"󰈙",enabled:true})
+    rows.push({action:"inspect",label:"Refresh VM configuration",detail:"Read protected configuration; asks for your Omarchy password",icon:"󰑐",enabled:!!caps.admin})
     rows.push({action:"diagnostics",label:"Save diagnostic report",detail:"Connection results without credentials",icon:"󰈙",enabled:true})
   } else if (tab === "Backups") {
     rows.push({action:"backup",label:"Create complete backup…",detail:caps.backup ? "Stops Windows temporarily; asks for your Omarchy password" : "Set the Windows setup workspace in plugin settings",icon:"󰁯",enabled:!!caps.backup})
+    rows.push({action:"inspect",label:"Refresh backup catalogue",detail:"Find existing archives; asks for your Omarchy password",icon:"󰑐",enabled:!!caps.admin})
   }
   return rows
 }

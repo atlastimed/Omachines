@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "atlastimed.omachines",
   "name": "Omachines",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "atlastimed",
   "license": "MIT",
   "description": "Windows VM controls, agent connections and complete backups in the Omarchy bar.",
@@ -20,7 +20,7 @@
       {"key":"notify","type":"boolean","label":"Operation notifications","defaultValue":true,"description":"Notify when backups or lifecycle operations finish or fail."},
       {"key":"asideEnabled","type":"boolean","label":"Aside integration","defaultValue":true,"description":"Show Aside controls and check its local browser connection. Never starts AI tasks."},
       {"key":"showLabel","type":"boolean","label":"Show name in the bar","defaultValue":true},
-      {"key":"setupWorkspace","type":"string","label":"Windows setup workspace","defaultValue":"","description":"Folder containing the existing reviewed create-development-backup.sh and research completion records. Optional; needed for backups."}
+      {"key":"setupWorkspace","type":"string","label":"Legacy Windows setup workspace","defaultValue":"","description":"Optional v0.1 backup provider and completion records. The installed v0.2 administrator helper provides built-in backups."}
     ]
   }
 }

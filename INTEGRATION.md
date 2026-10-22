@@ -54,3 +54,38 @@ A portable backup implementation, arbitrary VM connection configuration, and
 restoration UI are intentionally outside v0.1. This protocol is documented so
 reviewers can assess the boundary; it is not a recommendation to run an
 unreviewed privileged script.
+
+## Version 0.2 administrator provider
+
+When installed, the root-owned `backend/admin.py` supersedes the v0.1 backup
+workspace for backup creation. The old protocol above remains a compatibility
+fallback and source of imported evidence. v0.2 requires Omarchy's root-owned
+compose at `/var/lib/omarchy/windows/docker-compose.yml`, its protected per-user
+storage bind mount, the standard container identity, and storage named `storage`
+below a root-owned parent. An unsupported layout is refused, never migrated by
+this plugin. No Docker-group membership is needed.
+
+The helper accepts only fixed actions and validated backup identities or integer
+allocations. It runs via `sudo /usr/bin/python3 -I`, never imports user-controlled
+modules, serializes root operations, and uses Omarchy's existing lifecycle lock.
+Root-owned per-user metadata is readable by that user's primary group. The
+root-owned backup archives remain private. Metadata includes verification time,
+size, allocation and a distinct offline-boot result, not credentials.
+
+The versioned user registry describes the existing loopback ports and wrappers.
+A provider identifier is an explicit boundary for future adapters, not evidence
+that a Linux adapter or VM creation is already implemented.
+
+### Aside CLI updates
+
+`backend/aside-cli.ps1` returns only installed/version/sign-in fields in its default
+mode. The Windows SSH bridge must run PowerShell with that user's local application
+directory available. `-Mode mcp` starts the installed Aside MCP server. If an updater
+junction cannot be traversed from elevated SSH, the resolver accepts only a target
+inside Aside's own version directory with a known numeric version layout.
+
+An existing host Aside MCP wrapper may invoke a reviewed copy of this script in
+the guest. Installation of that copy and SSH authentication remain setup tasks;
+the plugin installer does not silently rewrite existing host bridges or guest files.
+The script must be kept in sync if used by an external wrapper. Neither MCP health
+nor CLI account status launches a model-backed task or proves model entitlement.
