@@ -438,7 +438,7 @@ class WindowsAnchorTests(Base):
     def setUp(self):
         super().setUp()
         self.enterContext(redirect_stdout(io.StringIO()))
-        self.anchor = self.path/"mounts/users/1000/storage"; self.anchor.mkdir(parents=True)
+        self.anchor = self.path/"mounts/uid-1000/storage"; self.anchor.mkdir(parents=True)
         self.patch(patch("operations.windows_anchor", return_value=self.anchor))
         self.mounted = [False]
         self.patch(patch("operations.os.path.ismount", side_effect=lambda p: self.mounted[0]))
