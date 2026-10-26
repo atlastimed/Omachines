@@ -52,7 +52,8 @@ sudo /usr/bin/python3 -I scripts/install-admin.py
 ```
 
 Both commands are repeated when updating code that changes the administrator
-helper (v0.3 does not change it). The Omarchy VM provider needs no helper. Read the source before installing privileged code. The helper is copied
+helper (v0.3 updates it to 0.3.0: rollback now detects every mount of the Windows
+storage). The Omarchy VM provider needs no helper. Read the source before installing privileged code. The helper is copied
 root-owned into `/usr/local/lib/omachines/`; old helper versions are retained there.
 Each administrative operation still asks for authorization in a visible terminal.
 The prompt asks for the **Omarchy password**.

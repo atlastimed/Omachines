@@ -92,4 +92,7 @@ storage and outside this repository. Restore keeps the replaced disk next to the
 VM storage; Omachines never deletes either copy.
 
 The Windows storage-anchor fix uses only the existing `omarchy-windows-vm __priv
-up/down` interface in the visible operation terminal and the unchanged helper.
+up/down` interface in the visible operation terminal and the helper's existing checks.
+Helper 0.3.0 changes only how rollback finds the storage mount: it reads the kernel
+mount table, because `os.path.ismount` misses a bind mount within one filesystem.
+It removes every mount layer before switching storage and refuses if one remains.

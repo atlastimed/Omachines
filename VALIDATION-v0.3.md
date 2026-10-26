@@ -2,13 +2,13 @@
 
 Version 0.3 adds the Omarchy VM (`omarchy-vm`, provider `omarchy-qemu`) beside the
 existing Windows VM, a machine switcher, and a fix for Windows backups after a host
-restart. The administrator helper is unchanged (still 0.2.0); no helper reinstall
-is needed.
+restart. The administrator helper moves to 0.3.0 for one rollback fix (below);
+reinstall it with `sudo /usr/bin/python3 -I scripts/install-admin.py`.
 
 ## Automated checks
 
 On Omarchy 4.0.6 with Quickshell 0.3.2, `python3 scripts/check.py` passed:
-135 Python tests (129 at first, plus 6 added for the review fixes below), `omarchy plugin validate`, zero-warning qmllint, and 25 native
+138 Python tests (129 at first, plus 9 added for the review fixes below), `omarchy plugin validate`, zero-warning qmllint, and 25 native
 Qt interaction cases (26 passes including initialization) in the isolated
 offscreen Quickshell runtime. The Python suite also passed with an empty `HOME`
 (no wrappers and no `omarchy-vm`), approximating generic CI. The repository
@@ -82,6 +82,14 @@ Second review (two P2 findings, both confirmed):
   "Windows is ready". It is now pinned to Windows.
 
 Three new tests plus a tightened recovery assertion; all fail without the fixes.
+
+Helper rollback (same mount-detection issue, found while fixing the above):
+`admin.py` rollback skipped the unmount when `os.path.ismount` missed a
+same-filesystem bind. The new storage would then be mounted on top, leaving the
+old bind hidden underneath. The helper (now 0.3.0) reads the mount table, removes
+every layer (at most four), and refuses before switching storage if the anchor
+stays mounted. Three new tests fail against helper 0.2.0. Not run against real
+Windows storage: rollback replaces the live disk.
 
 ## Read-only probes of the running Omarchy VM
 

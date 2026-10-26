@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 import time
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 COMPOSE=Path("/var/lib/omarchy/windows/docker-compose.yml")
 HELPER=Path("/usr/local/lib/omachines/admin.py")
 LOCK=Path("/run/lock/omarchy-windows-vm")
@@ -45,6 +45,18 @@ def command(argv, timeout=60, pass_fds=()):
     if p.returncode:
         raise Refused("A system command failed; original data and incomplete work were retained")
     return p.stdout
+
+
+def mounted(path):
+    # os.path.ismount compares devices, so it misses a bind mount within one
+    # filesystem. The kernel's mount table lists every mount point (field 5,
+    # with octal escapes for spaces).
+    try:
+        with open("/proc/self/mountinfo") as f:
+            points={re.sub(r"\\([0-7]{3})",lambda m:chr(int(m.group(1),8)),fields[4]) for fields in (line.split() for line in f) if len(fields)>4}
+    except OSError:
+        raise Refused("The mount table could not be read; nothing was switched") from None
+    return str(path) in points
 
 
 def trusted(path):
@@ -414,7 +426,12 @@ class Provider:
         if input().strip()!='ROLLBACK WINDOWS':raise Refused('Rollback cancelled')
         with lifecycle_lock():
             self.down()
-            if os.path.ismount(self.anchor):command(['/usr/bin/umount',str(self.anchor)])
+            # Remove every layer; a bind left in place would sit hidden under
+            # the new one.
+            for _ in range(4):
+                if not mounted(self.anchor):break
+                command(['/usr/bin/umount',str(self.anchor)])
+            if mounted(self.anchor):raise Refused('Windows storage is still mounted; nothing was switched')
             retained=Path(r['restoredCopy']) if retry else self.storage.with_name('storage-after-'+token())
             if retained.parent!=self.storage.parent or not re.fullmatch(r'storage-after-\d{8}T\d{6}Z-[0-9a-f]{6}',retained.name):raise Refused('Invalid rollback journal')
             r.update(status='rollback-switching',restoredCopy=str(retained));self.save()
