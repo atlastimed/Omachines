@@ -275,11 +275,25 @@ def refresh_snapshot(config, previous, deep):
     except Exception:
         # A failed collection must not republish old readiness. Shallow polls
         # retain this failure until a deep probe produces replacement evidence.
-        return {**previous, "state":"unknown", "summary":"Connection checks failed",
-                "error":"Connection check failed; check the connections and retry",
-                "checks":{key:check("error", "Connection state unavailable")
-                          for key in ("ssh", "desktop", "cua", "aside")},
-                "resources":{}, "guest":{}}
+        failed = {**previous, "state":"unknown", "summary":"Connection checks failed",
+                  "error":"Connection check failed; check the connections and retry",
+                  "checks":{key:check("error", "Connection state unavailable")
+                            for key in ("ssh", "desktop", "cua", "aside")},
+                  "resources":{}, "guest":{}}
+        # Attribute the failure to the selected machine: evidence carrying
+        # another machine's identity is discarded as stale by the daemon, which
+        # would retry at once and never show the selection.
+        try:
+            import machines
+            machine = machines.selected()
+        except Exception:
+            return failed
+        if previous.get("machineId") not in (None, machine["id"]) or previous.get("placeholder"):
+            failed.update(machineId=machine["id"], name=machine["name"], provider=machine["provider"],
+                          placeholder=False, capabilities={}, backups=[], allocation={}, history=[],
+                          machines=[{**row, "selected": row.get("id") == machine["id"]}
+                                    for row in previous.get("machines", []) if isinstance(row, dict)])
+        return failed
 
 
 def backups(config):

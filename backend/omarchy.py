@@ -163,14 +163,23 @@ def collect(config, machine, deep=False, previous=None):
         s["storage"] = {"availableBytes": usage.free, "totalBytes": usage.total}
     except OSError:
         pass
-    st = status(machine)
-    s["viewerOpen"] = st["viewerOpen"]
-    s["vmDiskBytes"] = st["diskUsedBytes"]
-    s["state"], s["summary"] = classify(st, op)
     # Catalogue and allocation are read on deep checks; shallow polls run only
     # status --json and keep the previous values for the same machine.
     if previous:
         s["backups"], s["allocation"] = previous.get("backups", []), previous.get("allocation", {})
+    try:
+        st = status(machine)
+    except (OperationError, ValueError, OSError):
+        # Report the failure as this machine's state rather than failing the
+        # snapshot, which keeps its identity and the switcher to other machines.
+        s["state"], s["summary"] = "unknown", "Omarchy VM status is unavailable"
+        s["error"] = "The omarchy-vm status check did not respond"
+        for name in ("ssh", "desktop", "cua"):
+            s["checks"][name] = check("unknown", "VM status unavailable")
+        return s
+    s["viewerOpen"] = st["viewerOpen"]
+    s["vmDiskBytes"] = st["diskUsedBytes"]
+    s["state"], s["summary"] = classify(st, op)
     if deep or not previous:
         for key, read in (("backups", backups), ("allocation", allocation)):
             try:

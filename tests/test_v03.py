@@ -205,6 +205,16 @@ class OmarchyStatusTests(Base):
         self.assertTrue(all(c["status"] == "offline" for c in stopped["checks"].values()))
         cua.assert_not_called()
 
+    def test_status_failure_is_reported_as_this_machines_state(self):
+        previous, _ = self.collect()
+        for failure in (core.OperationError("private output"), ValueError("bad json"), OSError("gone")):
+            with self.subTest(failure=failure):
+                state, cua = self.collect(previous=previous, status=failure)
+                self.assertEqual((state["state"], state["summary"]), ("unknown", "Omarchy VM status is unavailable"))
+                self.assertEqual({k: v["status"] for k, v in state["checks"].items()}, {"ssh": "unknown", "desktop": "unknown", "cua": "unknown"})
+                self.assertEqual(state["backups"], previous["backups"]); self.assertTrue(state["capabilities"]["lifecycle"])
+                self.assertNotIn("private output", json.dumps(state)); cua.assert_not_called()
+
     def test_shallow_poll_uses_status_only_and_keeps_previous_evidence(self):
         previous, _ = self.collect()
         calls = []
@@ -248,6 +258,26 @@ class SnapshotTests(Base):
         self.assertEqual(state["machines"][1]["state"], "unknown")
         self.omarchy_installed = False
         self.assertEqual(len(core.collect(core.settings())["machines"]), 1)
+
+    def test_selected_omarchy_status_failure_keeps_identity_and_switcher(self):
+        machines.initialize(); machines.select("omarchy")
+        with patch("omarchy.run", side_effect=fake_run(status=core.OperationError("timed out"))):
+            state = core.collect(core.settings())
+        self.assertEqual((state["machineId"], state["state"]), ("omarchy", "unknown"))
+        self.assertEqual([(m["id"], m["selected"]) for m in state["machines"]], [("windows", False), ("omarchy", True)])
+
+    def test_failed_collection_is_attributed_to_the_selected_machine(self):
+        machines.initialize(); machines.select("omarchy")
+        windows = {"machineId": "windows", "name": "Windows 11", "state": "running", "capabilities": {"aside": True},
+                   "backups": [{"id": "x"}], "history": [{"requestId": "w"}],
+                   "machines": [{"id": "windows", "selected": True}, {"id": "omarchy", "selected": False}]}
+        with patch("core.collect", side_effect=RuntimeError("bug")):
+            failed = core.refresh_snapshot(core.settings(), windows, True)
+            same = core.refresh_snapshot(core.settings(), {**windows, "machineId": "omarchy"}, True)
+        self.assertEqual((failed["machineId"], failed["name"], failed["state"]), ("omarchy", "Omarchy VM", "unknown"))
+        self.assertEqual((failed["capabilities"], failed["backups"], failed["history"]), ({}, [], []))
+        self.assertEqual([m["selected"] for m in failed["machines"]], [False, True])
+        self.assertEqual(same["backups"], [{"id": "x"}])  # same machine: unchanged behaviour
 
     def test_previous_from_other_machine_or_placeholder_is_never_reused(self):
         machines.initialize(); machines.select("omarchy")

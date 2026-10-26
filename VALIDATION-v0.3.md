@@ -8,7 +8,7 @@ is needed.
 ## Automated checks
 
 On Omarchy 4.0.6 with Quickshell 0.3.2, `python3 scripts/check.py` passed:
-129 Python tests, `omarchy plugin validate`, zero-warning qmllint, and 25 native
+132 Python tests (129 at first, plus 3 added for the review fix below), `omarchy plugin validate`, zero-warning qmllint, and 25 native
 Qt interaction cases (26 passes including initialization) in the isolated
 offscreen Quickshell runtime. The Python suite also passed with an empty `HOME`
 (no wrappers and no `omarchy-vm`), approximating generic CI. The repository
@@ -59,6 +59,13 @@ controls, Omarchy confirmations name the machine with Cancel focused first and
 pin its identity, an operation of the other machine is named, and the bar text
 and tooltip. Measured in the harness, the switcher with the longest state labels
 needs 376 of the panel's 430 px.
+
+Review fix (Codex, PR #3): if `omarchy-vm status --json` fails while the Omarchy VM
+is selected, the provider now reports "Omarchy VM status is unavailable" as that
+machine's state. Before, the whole snapshot failed, and the panel fell back to one
+without the machine list or the switcher. Any other failed collection is now
+attributed to the selected machine, so the daemon no longer discards it as stale
+and retries without pause. Covered by three new tests, which fail without the fix.
 
 ## Read-only probes of the running Omarchy VM
 
