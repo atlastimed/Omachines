@@ -110,6 +110,12 @@ Window {
       view.machine=omarchyMachine({operation:{status:"running",action:"backup",machineId:"windows",message:"Copying Windows storage"}})
       compare(findChild(view,"operation-message").text,"In progress: Windows 11: Copying Windows storage")
       view.activate();compare(actionSpy.count,0)
+      view.machine=omarchyMachine({operation:{status:"complete",action:"stop",machineId:"windows",message:"Windows shut down"}})
+      verify(!findChild(view,"operation-message").visible)
+      view.machine=omarchyMachine({operation:{status:"failed",action:"backup",machineId:"windows",message:"Backup failed"}})
+      verify(findChild(view,"operation-message").visible)
+      view.machine=omarchyMachine({operation:{status:"complete",action:"stop",machineId:"omarchy",message:"Omarchy VM shut down"}})
+      verify(findChild(view,"operation-message").visible)
     }
     function test_bar_text_shows_each_running_vm() {
       var state={machines:both,operation:{}}

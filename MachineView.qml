@@ -145,7 +145,9 @@ Column {
   Text {
     objectName: "operation-message"
     width: parent.width
-    visible: !!root.op.message
+    // Another machine's operation matters here only while it blocks actions
+    // or needs attention; its finished result belongs on its own page.
+    visible: !!root.op.message && (!root.opMachine || root.busy || root.op.status === "failed" || root.op.status === "interrupted")
     textFormat: Text.PlainText
     text: (root.busy ? "In progress: " : "") + (root.opMachine ? root.opMachine + ": " : "") + (root.op.message || "")
     color: root.op.status === "failed" || root.op.status === "interrupted" ? Commons.Color.urgent : root.foreground
