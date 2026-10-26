@@ -12,12 +12,38 @@ import time
 sys.dont_write_bytecode = True
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from core import OperationError, collect, now, operation, refresh_snapshot, settings, state_dir, write_json
+import machines
 from operations import ACTIONS, request_action, worker
 from probes import close_all, install_shutdown_handlers
 
 
 def emit(value):
     print(json.dumps(value,ensure_ascii=False,separators=(",",":")),flush=True)
+
+
+def stale(result, config):
+    # A collection that started before the selection changed is discarded.
+    if config["demo"] or not result.get("machineId"):
+        return False
+    try:
+        return result["machineId"]!=machines.selected()["id"]
+    except ValueError:
+        return False
+
+
+def select(machine_id, snapshot):
+    if not isinstance(machine_id,str):
+        raise OperationError("Choose a machine")
+    try:
+        machines.select(machine_id)
+        machine=machines.get(machine_id)
+    except ValueError as error:
+        raise OperationError(str(error)) from None
+    rows=[{**row,"selected":row.get("id")==machine_id} for row in snapshot.get("machines",[]) if isinstance(row,dict)]
+    # Placeholder until the first check of the newly selected machine finishes.
+    return {"state":"checking","summary":"Checking "+machine["name"],"name":machine["name"],"machineId":machine_id,
+            "provider":machine["provider"],"placeholder":True,"checks":{},"resources":{},"backups":[],
+            "operation":snapshot.get("operation",{}),"capabilities":{},"machines":rows,"history":[]}
 
 
 def daemon():
@@ -36,9 +62,13 @@ def daemon():
         while True:
             clock=time.monotonic()
             if pending and pending.done():
-                snapshot=pending.result()
+                result=pending.result()
                 pending=None
-                emit(snapshot)
+                if stale(result,config):
+                    requested=True
+                else:
+                    snapshot=result
+                    emit(snapshot)
             if not pending and (requested or clock>=due):
                 deep=(requested or clock>=deep_due) and snapshot.get("operation",{}).get("status") not in ("starting","running")
                 pending=pool.submit(refresh_snapshot,dict(config),dict(snapshot),deep)
@@ -74,7 +104,16 @@ def daemon():
                     elif verb=="refresh":
                         requested=True
                     elif verb=="action":
-                        request_action(command.get("action"),config,command.get("confirmed") is True,command.get("parameters",{}))
+                        machine_id=command.get("machineId")
+                        if machine_id is not None and not isinstance(machine_id,str):
+                            raise OperationError("Invalid machine")
+                        request_action(command.get("action"),config,command.get("confirmed") is True,command.get("parameters",{}),machine_id)
+                    elif verb=="select":
+                        if config["demo"]:
+                            raise OperationError("Demo mode shows sample data only")
+                        snapshot=select(command.get("machineId"),snapshot)
+                        emit(snapshot)
+                        requested=True
                     else:
                         raise OperationError("Unknown command")
                 except Exception as error:
@@ -94,10 +133,15 @@ def main():
     status=sub.add_parser("status")
     status.add_argument("--deep",action="store_true")
     status.add_argument("--demo",action="store_true")
+    status.add_argument("--machine",help="machine id; defaults to the selected machine")
     action=sub.add_parser("action")
     action.add_argument("action",choices=sorted(ACTIONS))
     action.add_argument("--confirm",action="store_true")
     action.add_argument("--parameters",default="{}")
+    action.add_argument("--machine",help="refuse unless this machine is selected")
+    sub.add_parser("machines",help="list machines and their state")
+    choose=sub.add_parser("select",help="select the machine shown in the panel")
+    choose.add_argument("machine")
     work=sub.add_parser("worker")
     work.add_argument("action",choices=sorted(ACTIONS))
     work.add_argument("--request-id",required=True)
@@ -106,9 +150,16 @@ def main():
     if args.command=="daemon":
         daemon()
     elif args.command=="status":
-        emit(collect(settings({"demo":args.demo}),deep=args.deep))
+        try:
+            emit(collect(settings({"demo":args.demo}),deep=args.deep,machine_id=args.machine))
+        except ValueError as error:
+            raise OperationError(str(error)) from None
+    elif args.command=="machines":
+        emit(collect(settings()).get("machines",[]))
+    elif args.command=="select":
+        emit({"selected":select(args.machine,{})["machineId"]})
     elif args.command=="action":
-        request_action(args.action,settings(),args.confirm,json.loads(args.parameters))
+        request_action(args.action,settings(),args.confirm,json.loads(args.parameters),args.machine)
     elif args.command=="worker":
         return worker(args.action,args.request_id,args.interactive)
     return 0

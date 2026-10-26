@@ -18,7 +18,7 @@ DOCS = ("README.md", "LICENSE", "INTEGRATION.md", "SECURITY.md",
         "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "REVIEW-FIXES.md")
 FILES = ("manifest.json", "BarWidget.qml", "MachineView.qml", "StatusRow.qml",
          "Service.qml", "Model.js", "BackupControls.qml", "ResourceControls.qml", *DOCS)
-BACKEND = ("core.py", "operations.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1")
+BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1")
 
 
 def run(*args):

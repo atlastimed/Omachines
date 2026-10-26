@@ -1,4 +1,4 @@
-"""Omarchy Windows adapter and private state. Standard library only."""
+"""Machine snapshots, the Omarchy Windows adapter and private state. Standard library only."""
 import base64
 from contextlib import contextmanager
 import datetime as dt
@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 ID = "atlastimed.omachines"
 
 
@@ -144,15 +144,52 @@ def parse_guest(raw):
     return result
 
 
-def viewer_windows():
+def hypr_windows(match):
     if not shutil.which("hyprctl"):
         return []
     try:
         clients = json.loads(run(["hyprctl", "clients", "-j"], 3))
-        return [c["address"] for c in clients if c.get("class") in ("xfreerdp", "wlfreerdp")
-                and c.get("title") == "Windows VM - Omarchy" and re.fullmatch(r"0x[0-9a-f]+", c.get("address", ""))]
-    except (OperationError, ValueError, OSError):
+        return [c["address"] for c in clients if isinstance(c, dict) and match(c)
+                and re.fullmatch(r"0x[0-9a-f]+", str(c.get("address", "")))]
+    except (OperationError, ValueError, OSError, TypeError):
         return []
+
+
+def viewer_windows():
+    return hypr_windows(lambda c: c.get("class") in ("xfreerdp", "wlfreerdp") and c.get("title") == "Windows VM - Omarchy")
+
+
+def cua_check(command, failure):
+    # Shared by both providers: Cua Driver's health_report schema version 1.
+    try:
+        with Client([command],10) as client:
+            result=client.call("health_report",{"include":["session_active","ax_capability","screen_capture_capability"]})
+        if not isinstance(result, dict):
+            raise ProbeError("Invalid Cua result")
+        health=result.get("structuredContent",{})
+        if not isinstance(health, dict):
+            raise ProbeError("Invalid Cua health response")
+        ok=health.get("schema_version")=="1" and health.get("overall")=="ok"
+        return check("ready" if ok else "error","Desktop tools responding" if ok else "Cua needs attention")
+    except (OSError, ProbeError, BrokenPipeError):
+        return check("error",failure)
+
+
+def machine_operation(op, machine_id):
+    # One operation runs at a time across machines; each snapshot interprets
+    # only its own machine's lifecycle evidence.
+    return op if op.get("machineId", "windows") == machine_id else {}
+
+
+def last_operation(op, machine_id):
+    # When the latest operation belongs to another machine, fall back to this
+    # machine's most recent finished operation in the bounded history.
+    own = machine_operation(op, machine_id)
+    if own:
+        return own
+    import history
+    rows = [h for h in history.entries() if isinstance(h, dict) and h.get("machineId", "windows") == machine_id]
+    return rows[-1] if rows else {}
 
 
 def reservation_fresh(value):
@@ -285,20 +322,41 @@ def backups(config):
 
 def capabilities(config):
     workspace = Path(config["setupWorkspace"]) if config["setupWorkspace"] else None
-    return {"viewer": bool(wrapper("windows-vm-launch")), "ssh": bool(wrapper("windows-vm-ssh")),
+    lifecycle = Path("/usr/bin/omarchy-windows-vm").is_file()
+    ssh = bool(wrapper("windows-vm-ssh"))
+    # Windows-only features are True here; the Omarchy provider sets them
+    # False so the panel hides them. Administrator-backed enabling flags
+    # (admin, verify, restore, allocate) are added by windows_details().
+    return {"viewer": bool(wrapper("windows-vm-launch")), "ssh": ssh,
             "cua": bool(wrapper("windows-vm-mcp")), "aside": bool(wrapper("windows-vm-aside-mcp")) and config["asideEnabled"],
             "backup": bool(workspace and (workspace/"create-development-backup.sh").is_file()),
-            "omarchy": Path("/usr/bin/omarchy-windows-vm").is_file()}
+            "omarchy": lifecycle, "lifecycle": lifecycle, "shared": True, "console": True, "handoff": True,
+            "asideSupported": True, "catalogue": True, "rehearsal": True, "rollback": True}
 
 
 def sample_state():
-    return {"schemaVersion":1,"name":"Windows 11","state":"running","summary":"Windows is ready","checkedAt":now(),
+    return {"schemaVersion":1,"name":"Windows 11","provider":"omarchy-windows","state":"running","summary":"Windows is ready","checkedAt":now(),
             "checks":{"ssh":check("ready","Command access ready"),"desktop":check("available","Desktop available"),
                       "cua":check("ready","Desktop tools responding"),"aside":check("closed","Open Aside to use its browser tools")},
             "resources":{"cpu":4,"memoryBytes":8589934592,"diskBytes":204946587648,"diskFreeBytes":149485748224},
-            "capabilities":{"viewer":True,"ssh":True,"cua":True,"aside":True,"backup":True,"omarchy":True},
+            "capabilities":{"viewer":True,"ssh":True,"cua":True,"aside":True,"backup":True,"omarchy":True,"lifecycle":True,
+                            "shared":True,"console":True,"handoff":True,"asideSupported":True,"catalogue":True,
+                            "rehearsal":True,"rollback":True},
+            "machines":[{"id":"windows","name":"Windows 11","provider":"omarchy-windows","state":"running","summary":"Windows is ready","active":True,"selected":True}],
             "backups":[{"label":"Development-ready","createdAt":now(),"verified":True,"restoreTested":False}],
             "operation":{},"demo":True,"viewerOpen":False,"storage":{"availableBytes":107374182400},"sharedPath":"~/Windows"}
+
+
+def windows_reachability(op):
+    ssh_port, console = tcp(2222), tcp(8006)
+    if ssh_port or console:
+        return ("running", "Windows is reachable") if ssh_port else ("starting", "Windows is starting")
+    op = last_operation(op, "windows")
+    if op.get("action") == "backup" and op.get("status") in ("starting", "running"):
+        return "unreachable", "Backup in progress"
+    if op.get("action")=="stop" and op.get("status")=="complete":
+        return "stopped", "Windows is stopped"
+    return "unreachable", "Windows is not reachable"
 
 
 def collect_windows(config, deep=False, previous=None):
@@ -314,18 +372,14 @@ def collect_windows(config, deep=False, previous=None):
         s["storage"] = {"availableBytes":usage.free,"totalBytes":usage.total}
     except OSError:
         pass
-    ssh_port, console = tcp(2222), tcp(8006)
-    if not ssh_port and not console:
-        s.update(state="unreachable", summary="Windows is not reachable")
-        backup_active = op.get("action") == "backup" and op.get("status") in ("starting", "running")
-        if backup_active:
-            s["summary"] = "Backup in progress"
+    state, summary = windows_reachability(op)
+    s.update(state=state, summary=summary)
+    if state in ("unreachable", "stopped"):
+        backup_active = summary == "Backup in progress"
         for name in ("ssh","desktop","cua","aside"):
             s["checks"][name]=check("offline","Unavailable during backup" if backup_active else "Start Windows, or check the recovery console")
-        if op.get("action")=="stop" and op.get("status")=="complete":
-            s.update(state="stopped",summary="Windows is stopped")
         return s
-    s.update(state="starting" if not ssh_port else "running", summary="Windows is starting" if not ssh_port else "Windows is reachable")
+    ssh_port = state == "running"
     if not deep:
         if previous:
             s["error"] = previous.get("error", "")
@@ -357,18 +411,7 @@ def collect_windows(config, deep=False, previous=None):
         return s
     s["checks"]["cua"]=check("missing","Cua connection is not configured")
     if caps["cua"]:
-        try:
-            with Client([wrapper("windows-vm-mcp")],10) as client:
-                result=client.call("health_report",{"include":["session_active","ax_capability","screen_capture_capability"]})
-                if not isinstance(result, dict):
-                    raise ProbeError("Invalid Cua result")
-                health=result.get("structuredContent",{})
-                if not isinstance(health, dict):
-                    raise ProbeError("Invalid Cua health response")
-                ok=health.get("schema_version")=="1" and health.get("overall")=="ok"
-                s["checks"]["cua"]=check("ready" if ok else "error","Desktop tools responding" if ok else "Cua needs attention")
-        except (OSError, ProbeError, BrokenPipeError):
-            s["checks"]["cua"]=check("error","Cua did not respond. Unlock Windows and check again.")
+        s["checks"]["cua"]=cua_check(wrapper("windows-vm-mcp"),"Cua did not respond. Unlock Windows and check again.")
     s["checks"]["aside"]=check("disabled","Aside integration is disabled")
     if caps["aside"]:
         s["checks"]["aside"]=check("closed","Open Aside to use its browser tools")
@@ -391,23 +434,14 @@ def aside_cli_status():
     return json.loads(run([ssh,f'powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}'],15))
 
 
-def collect(config, deep=False, previous=None):
+def windows_details(config, machine, state, deep, previous):
     import machines
-    import history
-    if config.get("demo"):
-        state=sample_state()
-        state.update(host={"cpu":16,"memoryBytes":32*1024**3,"availableBytes":16*1024**3},history=[],machineId="windows")
-        return state
-    try:
-        machine=machines.selected()
-    except ValueError:
-        return {"state":"unknown","summary":"Machine configuration needs attention","error":"Unsupported machine registry; no connections attempted","checks":{},"capabilities":{},"resources":{},"operation":operation(),"backups":[]}
-    state=collect_windows(config,deep,previous)
     admin=machines.admin_state()
-    state.update(name=machine['name'],machineId=machine['id'],machines=[{"id":machine['id'],"name":machine['name'],"provider":machine['provider']}],host=machines.host_resources(),allocation=admin.get('allocation',{}),rehearsal=admin.get('rehearsal',{}),recovery=admin.get('recovery',{}),history=list(reversed(history.entries()))[:20])
+    state.update(allocation=admin.get('allocation',{}),rehearsal=admin.get('rehearsal',{}),recovery=admin.get('recovery',{}))
     helper=Path('/usr/local/lib/omachines/admin.py')
     ready=helper.is_file() and not helper.is_symlink() and helper.stat().st_uid==0 and not helper.stat().st_mode&0o022
-    state['capabilities'].update(admin=ready,backup=ready or state['capabilities'].get('backup',False))
+    state['capabilities'].update(admin=ready,backup=ready or state['capabilities'].get('backup',False),
+        verify=ready,restore=ready,allocate=ready)
     # Preserve user labels while administrative evidence supersedes imported status.
     found={Path(r['path']).name:r for r in state['backups'] if r.get('path')}
     for r in admin.get('backups',[]):
@@ -440,4 +474,57 @@ def collect(config, deep=False, previous=None):
     else:
         for key in ('asideCli','asideAuth'):
             state['checks'][key]=check('unknown','Windows command access is needed to check Aside CLI')
+    return state
+
+
+def machine_summary(machine, op):
+    # Shallow, bounded state of a machine that is not shown in full.
+    try:
+        if machine["provider"] == "omarchy-qemu":
+            import omarchy
+            return omarchy.summary(machine, op)
+        return windows_reachability(op)
+    except Exception:
+        return "unknown", "State unavailable"
+
+
+def summaries(registry, machine, state):
+    import machines
+    rows=[]
+    for m in machines.usable(registry):
+        current = m["id"] == machine["id"]
+        value = (state.get("state","unknown"), state.get("summary","")) if current else machine_summary(m, state.get("operation") or {})
+        rows.append({"id":m["id"],"name":m["name"],"provider":m["provider"],"state":value[0],"summary":value[1],
+                     "active":value[0] in ("running","starting","paused","stopping","error"),"selected":current})
+    return rows
+
+
+def collect(config, deep=False, previous=None, machine_id=None):
+    import machines
+    import history
+    if config.get("demo"):
+        state=sample_state()
+        state.update(host={"cpu":16,"memoryBytes":32*1024**3,"availableBytes":16*1024**3},history=[],machineId="windows")
+        return state
+    try:
+        registry=machines.load()
+        machine=machines.selected(registry) if machine_id is None else machines.get(machine_id, registry)
+    except ValueError as error:
+        message="Unsupported machine registry; no connections attempted" if machine_id is None else str(error)
+        return {"state":"unknown","summary":"Machine configuration needs attention","error":message,"checks":{},"capabilities":{},"resources":{},"operation":operation(),"backups":[],"machines":[]}
+    if previous and (previous.get("placeholder") or previous.get("machineId", "windows") != machine["id"]):
+        previous = None  # never carry readiness across machines or from a placeholder
+    if machine["provider"] == "omarchy-qemu":
+        import omarchy
+        state=omarchy.collect(config,machine,deep,previous)
+    else:
+        state=windows_details(config,machine,collect_windows(config,deep,previous),deep,previous)
+    rows=[h for h in history.entries() if isinstance(h,dict) and h.get("machineId","windows")==machine["id"]]
+    host=machines.host_resources();total=host["memoryBytes"];gib=1024**3
+    # Allocation limits the provider accepts: omarchy-vm allows 16 CPUs/99G and
+    # leaves 4 GiB; the Windows helper leaves max(4 GiB, a quarter of RAM).
+    limits={"cpu":min(16,host["cpu"]),"ram":max(4,min(99,total//gib-4))} if machine["provider"]=="omarchy-qemu" else \
+        {"cpu":host["cpu"],"ram":max(4,(total-max(4*gib,total//4))//gib)}
+    state.update(name=machine['name'],machineId=machine['id'],provider=machine['provider'],host=host,limits=limits,history=list(reversed(rows))[:20])
+    state["machines"]=summaries(registry,machine,state)
     return state

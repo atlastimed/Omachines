@@ -17,6 +17,24 @@ ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "han
 ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
 TERMINAL = {"start", "stop", "backup"} | ADMIN
 DISRUPTIVE = {"stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"}
+# The Omarchy VM needs no password: only restore uses a visible terminal, for
+# its typed confirmation. Other operations are background workers.
+OMARCHY_ACTIONS = {"open", "start", "stop", "shared", "backup", "verify", "label", "restore", "allocate", "diagnostics", "connections"}
+OMARCHY_TERMINAL = {"restore"}
+BACKUP_IDS = {"omarchy-windows": r"(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?",
+              "omarchy-qemu": r"omarchy-\d{8}T\d{6}Z"}
+
+
+def omarchy(machine):
+    return machine["provider"] == "omarchy-qemu"
+
+
+def supported(action, machine):
+    return action in (OMARCHY_ACTIONS if omarchy(machine) else ACTIONS)
+
+
+def terminal(action, machine):
+    return action in (OMARCHY_TERMINAL if omarchy(machine) else TERMINAL)
 
 
 def record(action, status, message, **extra):
@@ -39,7 +57,7 @@ def notify(message, config):
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
-def request_action(action, config, confirmed=False, parameters=None):
+def request_action(action, config, confirmed=False, parameters=None, machine_id=None):
     if action not in ACTIONS:
         raise OperationError("Unknown action")
     if config["demo"]:
@@ -49,7 +67,12 @@ def request_action(action, config, confirmed=False, parameters=None):
     from machines import selected
     try: machine=selected()
     except ValueError:raise OperationError("Machine configuration needs attention") from None
-    parameters=validate_parameters(action,parameters or {})
+    # A confirmation is for the machine it was shown with; never retarget it.
+    if machine_id is not None and machine_id!=machine["id"]:
+        raise OperationError("The selected machine changed; review it and try again")
+    if not supported(action,machine):
+        raise OperationError("This action is not available for "+machine["name"])
+    parameters=validate_parameters(action,parameters or {},machine)
     # Reservation prevents two widgets from starting overlapping workers.
     with admission():
         if busy():
@@ -65,7 +88,7 @@ def request_action(action, config, confirmed=False, parameters=None):
         record(action,"starting","Waiting for the operation to start",startedEpoch=started,
                expiresEpoch=started+120,requestId=request_id,machineId=machine["id"],parameters=parameters)
         try:
-            if action in TERMINAL:
+            if terminal(action,machine):
                 subprocess.Popen(["/usr/bin/omarchy-launch-terminal",*argv,"--interactive"],
                     stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
             else:
@@ -85,11 +108,11 @@ def vm_priv(action):
         raise OperationError("VM operation failed or authentication was cancelled")
 
 
-def write_diagnostics(config):
-    state=collect(config,deep=True)
+def write_diagnostics(config, machine_id=None):
+    state=collect(config,deep=True,machine_id=machine_id)
     # Strict output allowlist: no guest paths, IPs, account IDs, windows or raw logs.
     from core import VERSION
-    report={"version":VERSION,"checkedAt":state["checkedAt"],"state":state["state"],
+    report={"version":VERSION,"machineId":state.get("machineId"),"provider":state.get("provider"),"checkedAt":state["checkedAt"],"state":state["state"],
             "checks":state["checks"],"resources":state["resources"],"capabilities":state["capabilities"],
             "backupCount":len(state["backups"]),"operationStatus":operation().get("status")}
     folder=state_dir()/"reports"
@@ -163,8 +186,20 @@ def backup(config):
     return "Backup verified. Windows was started; its connections are not ready yet."
 
 
-def perform(action, config, parameters=None):
-    parameters=validate_parameters(action,parameters or {})
+def perform(action, config, parameters=None, machine=None):
+    if machine is None:
+        from machines import selected
+        machine=selected()
+    if not supported(action,machine):
+        raise OperationError("This action is not available for "+machine["name"])
+    parameters=validate_parameters(action,parameters or {},machine)
+    if action=="diagnostics":
+        path=write_diagnostics(config,machine["id"])
+        subprocess.Popen(["xdg-open",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        return "Private diagnostic report saved and opened"
+    if omarchy(machine):
+        import omarchy as provider
+        return provider.perform(action,config,parameters,machine)
     if action in ADMIN:return admin_action(action,parameters)
     if action=="open":
         windows=viewer_windows()
@@ -230,18 +265,13 @@ def perform(action, config, parameters=None):
         subprocess.Popen(['xdg-open',path],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return 'Rehearsal image opened; review the Windows boot before recording success'
     if action=="connections":
-        from machines import selected
-        m=selected();folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
+        m=machine;folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/'connections.txt'
         text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
         fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'w') as f:f.write(text)
         subprocess.Popen(['xdg-open',str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return 'Private connection instructions opened'
-    if action=="diagnostics":
-        path=write_diagnostics(config)
-        subprocess.Popen(["xdg-open",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-        return "Private diagnostic report saved and opened"
     raise OperationError("Unknown action")
 
 
@@ -260,10 +290,13 @@ def worker(action, request_id, interactive=False):
                         or not reservation_fresh(reservation)):
                     raise OperationError("This operation request expired or was superseded; request it again")
                 config=settings()
-                from machines import selected
+                from machines import get
                 try:
-                    if selected()['id']!=reservation.get('machineId','windows'):
-                        raise ValueError('Machine changed')
+                    # Pinned to the machine it was requested for, even if the
+                    # panel switched machines while the worker was starting.
+                    machine=get(reservation.get('machineId','windows'))
+                    if not supported(action,machine):
+                        raise ValueError('Unsupported action')
                 except ValueError:
                     record(action,'failed','Machine configuration changed; request the action again')
                     raise OperationError('Machine configuration changed; request the action again') from None
@@ -280,9 +313,9 @@ def worker(action, request_id, interactive=False):
                 print(str(error),flush=True)
             return 1
         try:
-            message=perform(action,config,reservation.get("parameters",{}))
+            message=perform(action,config,reservation.get("parameters",{}),machine)
             record(action,"complete",message)
-            if action in TERMINAL or action=="diagnostics":
+            if action in TERMINAL or action in ("diagnostics","backup","verify","allocate"):
                 notify(message,config)
             if interactive:
                 print("\n"+message,flush=True)
@@ -300,12 +333,13 @@ def worker(action, request_id, interactive=False):
             return 1
 
 
-def validate_parameters(action, values):
+def validate_parameters(action, values, machine=None):
     if not isinstance(values,dict):raise OperationError('Invalid action parameters')
     result={}
     if action in ('verify','rehearse','restore','label'):
         name=values.get('backupId','')
-        if not isinstance(name,str) or not re.fullmatch(r'(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?',name):raise OperationError('Select a backup first')
+        pattern=BACKUP_IDS[machine["provider"] if machine else "omarchy-windows"]
+        if not isinstance(name,str) or not re.fullmatch(pattern,name):raise OperationError('Select a backup first')
         result['backupId']=name
     if action=='label':
         label=values.get('label','')

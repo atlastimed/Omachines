@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"backend"))
 import core
@@ -23,6 +23,8 @@ class OperationsTests(unittest.TestCase):
         self.path = Path(self.tmp.name)
         self.patch(patch.dict(os.environ, {"XDG_STATE_HOME": str(self.path)}))
         self.config = {"demo": False, "notify": False}
+        # Hermetic: the real Omarchy VM control is never consulted.
+        self.patch(patch("machines.available", lambda m: m["provider"] == "omarchy-windows"))
         self.patch(patch("operations.settings", return_value=self.config))
         self.launch = self.patch(patch("operations.subprocess.Popen"))
         self.perform = self.patch(patch("operations.perform", return_value="Done"))
@@ -40,7 +42,7 @@ class OperationsTests(unittest.TestCase):
         self.assertIn(token, self.launch.call_args.args[0])
         self.assertEqual(operations.worker("stop", token), 0)
         self.assertEqual(operations.worker("stop", token), 1)
-        self.perform.assert_called_once_with("stop", self.config, {})
+        self.perform.assert_called_once_with("stop", self.config, {}, ANY)
 
     def test_worker_starting_before_launcher_returns_waits_for_admission(self):
         threads, results = [], []
@@ -73,7 +75,7 @@ class OperationsTests(unittest.TestCase):
         current = core.operation()
         self.assertEqual(operations.worker("stop", old), 1)
         self.assertEqual(core.operation(), current)
-        self.perform.assert_called_once_with("start", self.config, {})
+        self.perform.assert_called_once_with("start", self.config, {}, ANY)
 
     def test_wrong_action_or_identity_does_not_consume_request(self):
         token = self.reserve()
