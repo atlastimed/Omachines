@@ -1,8 +1,8 @@
 # Contributing
 
-Keep changes small and describe their user-visible effect. Version 0.2 is an
-early preview for one Windows integration; discuss new backends or privileged
-operations before implementing them.
+Keep changes small and describe their user-visible effect. Version 0.3 is an
+early preview for two existing integrations (Omarchy Windows and the `omarchy-vm`
+Omarchy VM); discuss new backends or privileged operations before implementing them.
 
 Run on Omarchy:
 
@@ -18,7 +18,9 @@ same pinned upstream version with an archive SHA-256 check.
 
 The Qt tests use installed Omarchy components in an isolated offscreen
 Quickshell instance. Keep physical Hyprland verification distinct from those
-tests. Ask the machine owner before stopping Windows or closing their apps.
+tests. Ask the machine owner before stopping either VM or closing their apps.
+Unit tests must not run `omarchy-vm`, SSH, sudo or Docker; patch
+`machines.available` so a developer's real VM is never consulted.
 
 Never commit host/guest credentials, real usernames in test fixtures, local
 runtime state, screenshots of personal apps, VM images or backups. Use generic

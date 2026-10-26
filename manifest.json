@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "id": "atlastimed.omachines",
   "name": "Omachines",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "atlastimed",
   "license": "MIT",
-  "description": "Windows VM controls, agent connections and complete backups in the Omarchy bar.",
+  "description": "Windows and Omarchy VM controls, agent connections and complete backups in the Omarchy bar.",
   "kinds": ["service", "bar-widget"],
   "entryPoints": {"service": "Service.qml", "barWidget": "BarWidget.qml"},
   "barWidget": {
     "displayName": "Omachines",
     "category": "System",
-    "aliases": ["vm", "windows", "machines"],
+    "aliases": ["vm", "windows", "omarchy", "linux", "machines"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {"pollSeconds": 120, "notify": true, "asideEnabled": true, "showLabel": true, "setupWorkspace": ""},
     "schema": [
       {"key":"pollSeconds","type":"integer","label":"Connection check interval (seconds)","min":30,"max":900,"step":30,"defaultValue":120,"description":"One check shared by every monitor. Lightweight status updates every 15 seconds; Check connections performs a fresh guest probe."},
       {"key":"notify","type":"boolean","label":"Operation notifications","defaultValue":true,"description":"Notify when backups or lifecycle operations finish or fail."},
-      {"key":"asideEnabled","type":"boolean","label":"Aside integration","defaultValue":true,"description":"Show Aside controls and check its local browser connection. Never starts AI tasks."},
+      {"key":"asideEnabled","type":"boolean","label":"Aside integration","defaultValue":true,"description":"Show Aside controls for the Windows VM and check its local browser connection. Never starts AI tasks."},
       {"key":"showLabel","type":"boolean","label":"Show name in the bar","defaultValue":true},
       {"key":"setupWorkspace","type":"string","label":"Legacy Windows setup workspace","defaultValue":"","description":"Optional v0.1 backup provider and completion records. The installed v0.2 administrator helper provides built-in backups."}
     ]
