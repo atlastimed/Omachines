@@ -5,7 +5,7 @@ Item {
   id: root
   property var shell: null
   property var manifest: null
-  property var snapshot: ({ state: "checking", summary: "Checking Windows", checks: {}, resources: {}, capabilities: {}, backups: [], operation: {} })
+  property var snapshot: ({ state: "checking", summary: "Checking machines", checks: {}, resources: {}, capabilities: {}, backups: [], operation: {}, machines: [] })
   property bool connected: false
   property string serviceError: ""
   property var configuration: ({})
@@ -22,7 +22,14 @@ Item {
     send({cmd: "configure", settings: value})
   }
   function refresh() { send({cmd: "refresh"}) }
-  function action(name, confirmed, parameters) { send({cmd: "action", action: name, confirmed: confirmed === true, parameters: parameters || {}}) }
+  // machineId pins the request to the machine the panel showed; empty means
+  // the currently selected machine.
+  function action(name, confirmed, parameters, machineId) {
+    var message = {cmd: "action", action: name, confirmed: confirmed === true, parameters: parameters || {}}
+    if (machineId) message.machineId = String(machineId)
+    send(message)
+  }
+  function select(machineId) { send({cmd: "select", machineId: String(machineId || "")}) }
 
   Process {
     id: daemon

@@ -16,6 +16,7 @@ Column {
   property int draftCpu: 4
   property int draftRam: 8
   property bool modified: false
+  readonly property var limits: machine.limits || ({})
   readonly property bool editing: cpu.field.activeFocus || cpu.field.contentItem.activeFocus || ram.field.activeFocus || ram.field.contentItem.activeFocus
   function focusEntry() { cpu.field.forceActiveFocus() }
   signal request(string action,var parameters)
@@ -32,16 +33,16 @@ Column {
   }
   spacing:root.spacingTokens.controlGap
   enabled:!Model.active(machine) && !machine.demo
-  Text { text:"Windows resources"; color:root.foreground; font.family:root.fontFamily; font.pixelSize:root.fontTokens.subtitle; font.bold:true }
+  Text { text:Model.name(root.machine)+" resources"; color:root.foreground; font.family:root.fontFamily; font.pixelSize:root.fontTokens.subtitle; font.bold:true }
   Row {
     spacing:root.spacingTokens.panelGap
-    NumberField { id:cpu; objectName:"allocation-cpu"; label:"Virtual CPUs"; value:root.draftCpu; from:1; to:Number((root.machine.host || {}).cpu || 16); foreground:root.foreground; fontFamily:root.fontFamily; onModified:function(value){root.draftCpu=value;root.modified=true} }
-    NumberField { id:ram; objectName:"allocation-ram"; label:"RAM (GiB)"; value:root.draftRam; from:4; to:Math.max(4,Math.floor(Number((root.machine.host || {}).memoryBytes || 32*1073741824)/1073741824*0.75)); foreground:root.foreground; fontFamily:root.fontFamily; onModified:function(value){root.draftRam=value;root.modified=true} }
+    NumberField { id:cpu; objectName:"allocation-cpu"; label:"Virtual CPUs"; value:root.draftCpu; from:1; to:Number(root.limits.cpu || (root.machine.host || {}).cpu || 16); foreground:root.foreground; fontFamily:root.fontFamily; onModified:function(value){root.draftCpu=value;root.modified=true} }
+    NumberField { id:ram; objectName:"allocation-ram"; label:"RAM (GiB)"; value:root.draftRam; from:4; to:Math.max(4,Number(root.limits.ram || Math.floor(Number((root.machine.host || {}).memoryBytes || 32*1073741824)/1073741824*0.75))); foreground:root.foreground; fontFamily:root.fontFamily; onModified:function(value){root.draftRam=value;root.modified=true} }
   }
   Text {
     width:parent.width; wrapMode:Text.WordWrap; textFormat:Text.PlainText
     color:root.foreground; opacity:0.75; font.family:root.fontFamily; font.pixelSize:root.fontTokens.caption
-    text:"Host: "+Model.gib((root.machine.host || {}).memoryBytes)+" RAM · "+Model.freeSpace((root.machine.host || {}).availableBytes)+" now. Windows must stop to apply changes. Leave room for Omarchy and other running apps."
+    text:"Host: "+Model.gib((root.machine.host || {}).memoryBytes)+" RAM · "+Model.freeSpace((root.machine.host || {}).availableBytes)+" now. "+(Model.isOmarchy(root.machine) ? Model.name(root.machine)+" restarts to apply changes if it is running." : "Windows must stop to apply changes.")+" Leave room for Omarchy and other running apps."
   }
-  Button { text:"Apply allocation…"; bordered:true; focusable:true; foreground:root.foreground; enabled:!!(root.machine.capabilities || {}).admin; onClicked:root.request("allocate",{cpu:root.draftCpu,ram:root.draftRam}) }
+  Button { objectName:"apply-allocation"; text:"Apply allocation…"; bordered:true; focusable:true; foreground:root.foreground; enabled:!!(root.machine.capabilities || {}).allocate; onClicked:root.request("allocate",{cpu:root.draftCpu,ram:root.draftRam}) }
 }

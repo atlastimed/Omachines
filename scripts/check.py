@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='omachines-qt-') as tmp:
     for item in SHELL.iterdir():
         if item.is_dir(): (imports/item.name).symlink_to(item,target_is_directory=True)
     for item in [*ROOT.glob('*.qml'),*ROOT.glob('*.js')]: shutil.copy2(item,imports/item.name)
-    (imports/'PanelTests.qml').write_text((ROOT/'tests/tst_panel.qml').read_text().replace('import ".." as App','import "." as App'))
+    (imports/'PanelTests.qml').write_text((ROOT/'tests/tst_panel.qml').read_text().replace('import ".." as App','import "." as App').replace('import "../Model.js"','import "Model.js"'))
     result=subprocess.run(['qs','--no-color','-p',str(imports/'PanelTests.qml')],cwd=ROOT,env=qtenv,capture_output=True,text=True,timeout=40)
     output=result.stdout+result.stderr
     print(output)
