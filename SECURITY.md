@@ -1,8 +1,8 @@
 # Security
 
 Omarchy plugins run with the desktop user's privileges. This plugin is not a
-sandbox or a boundary between agents and personal Windows accounts. Existing
-SSH/Cua/Aside bridges may have broad access to the guest and its signed-in apps.
+sandbox or a boundary between agents and personal accounts in a guest. Existing
+SSH/Cua/Aside bridges may have broad access to each guest and its signed-in apps.
 
 Omachines adds no root daemon, network listener or credential store. Passive
 checks do not request elevation. Explicit VM lifecycle and backup operations
@@ -68,3 +68,31 @@ screenshot supports explicit boot review; there is no host-accessible QMP listen
 The clone still contains credentials from the backup and is retained privately.
 This is isolation for a restore test, not a sandbox guarantee against a hostile
 kernel/hypervisor exploit. Guest code is never trusted as a host command source.
+
+## Version 0.3 Omarchy VM provider
+
+The Omarchy VM provider runs only the fixed user-owned commands `omarchy-vm`,
+`omarchy-vm-ssh` and `omarchy-vm-mcp` from `~/.local/bin`. It needs no root,
+sudo, polkit or password and adds no privileged code; the administrator helper is
+not used for it. Registry entries with other paths are refused. Status, catalogue
+and guest-probe output is reduced to known fields; failure reasons are shown only
+when they are short `omarchy-vm:` messages without paths.
+
+Agents connected through `omarchy-vm-ssh` get **passwordless sudo inside that
+guest**. That is root in the VM only, not on the host, but it covers everything in
+the guest, including its signed-in accounts and the shared folder. The shared
+folder `~/OmarchyVM` (guest `~/Shared`) is writable from the guest: treat its
+contents as untrusted, and do not put host secrets there. The VM's QEMU process
+runs as the desktop user.
+
+Omarchy VM backups in `~/Omarchy-VM-Backups/` contain the whole guest disk,
+including any credentials and signed-in sessions, plus the host-side SSH
+configuration and known hosts (not the private key). Keep them on encrypted
+storage and outside this repository. Restore keeps the replaced disk next to the
+VM storage; Omachines never deletes either copy.
+
+The Windows storage-anchor fix uses only the existing `omarchy-windows-vm __priv
+up/down` interface in the visible operation terminal and the helper's existing checks.
+Helper 0.3.0 changes only how rollback finds the storage mount: it reads the kernel
+mount table, because `os.path.ismount` misses a bind mount within one filesystem.
+It removes every mount layer before switching storage and refuses if one remains.

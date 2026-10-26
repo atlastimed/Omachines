@@ -14,6 +14,7 @@ class ResponseTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.patch(patch.dict(os.environ, {"XDG_STATE_HOME":tmp.name}))
+        self.patch(patch("machines.available", lambda m: m["provider"] == "omarchy-windows"))
         self.patch(patch("core.viewer_windows", return_value=[]))
         self.patch(patch("core.backups", return_value=[]))
         self.patch(patch("core.tcp", return_value=True))

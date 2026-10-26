@@ -8,7 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import Mock,patch
+from unittest.mock import Mock,mock_open,patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'backend'))
 import admin
@@ -116,6 +116,39 @@ class RecoveryRegressionTests(unittest.TestCase):
         self.assertEqual((self.storage/'data.img').read_text(),'original')
         self.assertEqual((retained/'data.img').read_text(),'restored')
         self.assertEqual(self.p.state['recovery']['status'],'rolled-back')
+
+
+class MountTests(unittest.TestCase):
+    setUp=RestoreTests.setUp
+    tearDown=RestoreTests.tearDown
+    run_restore=RestoreTests.run_restore
+    def test_mount_table_finds_same_filesystem_binds(self):
+        table='36 25 0:32 / / rw - btrfs /dev/root rw\n90 36 0:32 /src /srv/anchor/storage rw - btrfs /dev/root rw\n91 36 0:32 /x /mnt/with\\040space rw - btrfs /dev/root rw\n'
+        with patch('admin.open',mock_open(read_data=table),create=True):
+            self.assertTrue(admin.mounted(Path('/srv/anchor/storage')))
+            self.assertTrue(admin.mounted('/mnt/with space'))
+            self.assertFalse(admin.mounted('/srv/anchor'))
+        with patch('admin.open',side_effect=OSError,create=True),self.assertRaises(admin.Refused):admin.mounted('/srv')
+    def rollback(self,layers,removable=True):
+        self.run_restore();self.p.up.reset_mock()
+        state={'layers':layers};calls=[]
+        def cmd(argv,*a,**kw):
+            calls.append(argv[0])
+            if argv[0]=='/usr/bin/umount' and removable:state['layers']-=1
+        with patch('admin.mounted',side_effect=lambda p:state['layers']>0),patch('admin.lifecycle_lock',return_value=nullcontext()),\
+                patch('admin.command',Mock(side_effect=cmd)),patch('builtins.input',return_value='ROLLBACK WINDOWS'):
+            self.p.rollback()
+        return calls
+    def test_rollback_unmounts_every_layer_before_switching(self):
+        # os.path.ismount reports False for a same-filesystem bind; the mount table does not.
+        with patch('admin.os.path.ismount',return_value=False):
+            calls=self.rollback(2)
+        self.assertEqual(calls,['/usr/bin/umount','/usr/bin/umount','/usr/bin/mount'])
+        self.assertEqual((self.storage/'data.img').read_text(),'original');self.p.up.assert_called_once()
+    def test_rollback_refuses_while_storage_stays_mounted(self):
+        with self.assertRaisesRegex(admin.Refused,'still mounted'):self.rollback(1,removable=False)
+        self.assertEqual((self.storage/'data.img').read_text(),'restored')
+        self.assertEqual(self.p.state['recovery']['status'],'restored');self.p.up.assert_not_called()
 
 
 class AllocationRecoveryTests(unittest.TestCase):

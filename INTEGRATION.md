@@ -1,8 +1,12 @@
 # Integration requirements
 
-Omachines currently adapts an existing Omarchy Windows setup. Optional bridges
-are external prerequisites, not programs that this repository installs. The
-installer never provisions Windows, credentials, storage or SSH authentication.
+Omachines adapts two existing machines: an Omarchy Windows setup (provider
+`omarchy-windows`) and, from v0.3, an Omarchy VM run by `omarchy-vm` (provider
+`omarchy-qemu`). Optional bridges are external prerequisites, not programs that
+this repository installs. The installer never provisions a guest, credentials,
+storage or SSH authentication.
+
+## Omarchy Windows provider
 
 | Capability | Expected local integration |
 | --- | --- |
@@ -89,3 +93,47 @@ the guest. Installation of that copy and SSH authentication remain setup tasks;
 the plugin installer does not silently rewrite existing host bridges or guest files.
 The script must be kept in sync if used by an external wrapper. Neither MCP health
 nor CLI account status launches a model-backed task or proves model entitlement.
+
+## Version 0.3 Omarchy VM provider (`omarchy-qemu`)
+
+The machine `omarchy` uses fixed paths; changing any of them in the registry fails
+closed. It is listed only while `~/.local/bin/omarchy-vm` is an executable file.
+Everything runs as the desktop user: no root, sudo, polkit or terminal password.
+
+| Capability | Expected local integration |
+| --- | --- |
+| Status | `omarchy-vm status --json` prints `{"running", "guest", "sshReady", "viewerOpen", "installMedia", "diskUsedBytes"}` quickly, without SSH. `guest` is QEMU's run state (`running`, `paused`, ...) or `null`; `sshReady` means an SSH banner on `127.0.0.1:2223`. Only these fields are read; the install-media path is reduced to a boolean. |
+| Start/stop | `omarchy-vm start` starts the systemd user unit `omarchy-vm.service`; `omarchy-vm stop` shuts the guest down cleanly over SSH with an ACPI fallback. The panel never uses `stop --force`. |
+| Viewer | `omarchy-vm view` starts the VM if needed and opens a viewer (Hyprland class `remote-viewer`, title starting `Omarchy VM`). Omachines focuses an existing viewer itself. Closing it leaves the VM running. |
+| Backups | `omarchy-vm backup` stops a running VM, writes `~/Omarchy-VM-Backups/<id>/{vm.tar,SHA256SUMS,manifest.json}`, verifies it and restarts the VM if it was running. Progress lines `OMACHINES_STAGE:copying`, `verifying` and optionally `starting`, then `Backup <id> saved and verified`. Nonzero exit on failure, with `omarchy-vm: <reason>` on stderr. Identities match `omarchy-\d{8}T\d{6}Z`. |
+| Catalogue | `omarchy-vm backups --json` lists `{id, label, createdAt, bytes, verified, verifiedAt, restoreTested, ...}`. Omachines keeps only those fields, never the path. |
+| Verify/restore | `omarchy-vm verify <id>`; `omarchy-vm restore <id> --replace-current` verifies, stops the VM, keeps the current disk in the VM storage directory as `previous-<time>/`, extracts and restarts it if it was running. |
+| CPU/RAM | `omarchy-vm resources` prints `{"cpus", "memory", "hostCpus"}`; `resources --cpus N --memory NG` saves the allocation and restarts a running VM. The tool accepts at most 16 CPUs and `99G`, leaving 4 GiB for the host. |
+| Command checks | `~/.local/bin/omarchy-vm-ssh '<command>'` runs one command as the guest user with BatchMode and a pinned host key. One read-only probe returns CPU count, memory, root filesystem size/free, and whether `systemctl --user show-environment` contains `HYPRLAND_INSTANCE_SIGNATURE=` (the auto-signed-in Hyprland session). |
+| Desktop tools | `~/.local/bin/omarchy-vm-mcp` is Cua Driver's stdio MCP in that session. `health_report` must return `structuredContent` with `schema_version` `"1"` and `overall` `"ok"`, the same schema as on Windows. |
+| Shared files | `~/OmarchyVM` on the host; the guest sees it as `~/Shared`. |
+| Storage | VM storage `/mnt/windows-vm/omarchy` (free space is shown); configuration `~/.config/omarchy-vm/config.json` (read only through `omarchy-vm`). |
+
+The 15-second poll runs only `status --json`. The deep check (every check interval,
+or **Check connections**) adds the SSH probe, then Cua health when the desktop
+session is up. The catalogue and allocation are read on deep checks. Aside, the
+recovery console, console handoff, the administrator helper and offline-boot
+rehearsal do not exist for this provider; its capabilities hide them.
+
+Only restore uses a visible terminal, for the typed `RESTORE <id>` confirmation.
+Start, stop, backup, verify, label and allocation are background workers that
+record progress in the operation state. Backup labels are stored privately in
+`~/.local/state/omachines/labels.json`; the backup manifest is never rewritten.
+
+## Version 0.3 Windows storage anchor
+
+The root helper requires Omarchy's protected bind mount at
+`/var/lib/omarchy/windows/mounts/users/<uid>/storage`. Omarchy recreates it only in
+`omarchy-windows-vm __priv up`, so after a host restart it is missing until Windows
+first starts. When a Windows backup is requested while Windows is stopped and that
+anchor is not a mountpoint, the operation terminal explains this, runs
+`__priv up` (sudo), waits for the guest to answer over SSH (at most five minutes,
+or two minutes without an SSH bridge), runs `__priv down` (the bind stays mounted),
+then runs the helper's backup with Windows stopped. Windows is left stopped. If it
+does not finish starting it is shut down and nothing is backed up. The helper
+itself is unchanged.

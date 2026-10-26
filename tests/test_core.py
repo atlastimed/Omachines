@@ -18,8 +18,11 @@ class CoreTests(unittest.TestCase):
         self.path=Path(self.tmp.name)
         self.env=patch.dict(os.environ,{'XDG_STATE_HOME':str(self.path)})
         self.env.start()
+        self.only_windows=patch('machines.available',lambda m:m['provider']=='omarchy-windows')
+        self.only_windows.start()
 
     def tearDown(self):
+        self.only_windows.stop()
         self.env.stop()
         self.tmp.cleanup()
 

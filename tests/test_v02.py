@@ -12,7 +12,8 @@ import core,history,machines,operations
 class NewStateTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.env=patch.dict(os.environ,{'XDG_STATE_HOME':self.tmp.name});self.env.start()
-    def tearDown(self):self.env.stop();self.tmp.cleanup()
+        self.only_windows=patch('machines.available',lambda m:m['provider']=='omarchy-windows');self.only_windows.start()
+    def tearDown(self):self.only_windows.stop();self.env.stop();self.tmp.cleanup()
     def test_registry_migrates_only_once_and_preserves_name(self):
         first=machines.initialize();self.assertEqual(first['selected'],'windows')
         first['machines'][0]['name']='Testing Windows'

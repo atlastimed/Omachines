@@ -16,7 +16,7 @@ Panel {
   readonly property var hostBar: bar
   property var machineService: null
   readonly property bool vertical: hostBar ? hostBar.vertical : false
-  readonly property var snapshot: machineService ? machineService.snapshot : ({state:"checking",summary:"Connecting to Omachines",checks:{},capabilities:{},backups:[]})
+  readonly property var snapshot: machineService ? machineService.snapshot : ({state:"checking",summary:"Connecting to Omachines",checks:{},capabilities:{},backups:[],machines:[]})
   readonly property var config: ({pollSeconds:Number(setting("pollSeconds",120)),notify:flag("notify",true),asideEnabled:flag("asideEnabled",true),setupWorkspace:String(setting("setupWorkspace","")),demo:flag("demo",false)})
   readonly property color foreground: root.popupTokens.text
   readonly property string fontFamily: hostBar ? hostBar.fontFamily : root.fontTokens.family
@@ -44,12 +44,13 @@ Panel {
   WidgetButton {
     id: button
     bar: root.bar
-    text: root.vertical || !root.flag("showLabel",true) ? "󰍹" : "󰍹 " + (Model.active(root.snapshot) ? "VM…" : "VM")
-    tooltipText: "Omachines · " + (root.snapshot.summary || "Checking Windows")
+    // Shows a glyph for each running VM; the tooltip names every machine.
+    text: Model.barText(root.snapshot, root.vertical, root.flag("showLabel",true))
+    tooltipText: "Omachines · " + Model.tooltip(root.snapshot)
     onPressed: function(code) {
       if (code === Qt.LeftButton) root.toggle()
       else if (code === Qt.MiddleButton) root.refresh()
-      else if (code === Qt.RightButton && root.machineService) root.machineService.action("open",false)
+      else if (code === Qt.RightButton && root.machineService) root.machineService.action("open",false,{},root.snapshot.machineId || "")
     }
   }
   KeyboardPanel {
@@ -91,7 +92,8 @@ Panel {
           fontFamily: root.fontFamily
           serviceError: root.machineService ? root.machineService.serviceError : ""
           onConfirmationClosed: if (root.opened) keys.forceActiveFocus()
-          onActionRequested: function(action,confirmed,parameters) { if (action === "refresh") root.refresh(); else if (root.machineService) root.machineService.action(action,confirmed,parameters) }
+          onActionRequested: function(action,confirmed,parameters,machineId) { if (action === "refresh") root.refresh(); else if (root.machineService) root.machineService.action(action,confirmed,parameters,machineId) }
+          onMachineSelected: function(machineId) { if (root.machineService) root.machineService.select(machineId) }
           onSettingsChanged: function(values) { root.persist(values) }
           onSectionChanged: flick.contentY = 0
           onRevealItem: function(item) {

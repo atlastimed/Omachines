@@ -10,13 +10,31 @@ import time
 import uuid
 
 from core import (ROOT, OperationError, admission, backups, busy, check, collect, now, operation, read_json,
-                  reservation_fresh, run, settings, state_dir, viewer_windows, wrapper, write_json)
+                  reservation_fresh, run, settings, state_dir, viewer_windows, windows_reachability, wrapper, write_json)
 from mcp import Client
 
 ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections"}
 ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
 TERMINAL = {"start", "stop", "backup"} | ADMIN
 DISRUPTIVE = {"stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"}
+# The Omarchy VM needs no password: only restore uses a visible terminal, for
+# its typed confirmation. Other operations are background workers.
+OMARCHY_ACTIONS = {"open", "start", "stop", "shared", "backup", "verify", "label", "restore", "allocate", "diagnostics", "connections"}
+OMARCHY_TERMINAL = {"restore"}
+BACKUP_IDS = {"omarchy-windows": r"(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?",
+              "omarchy-qemu": r"omarchy-\d{8}T\d{6}Z"}
+
+
+def omarchy(machine):
+    return machine["provider"] == "omarchy-qemu"
+
+
+def supported(action, machine):
+    return action in (OMARCHY_ACTIONS if omarchy(machine) else ACTIONS)
+
+
+def terminal(action, machine):
+    return action in (OMARCHY_TERMINAL if omarchy(machine) else TERMINAL)
 
 
 def record(action, status, message, **extra):
@@ -39,7 +57,7 @@ def notify(message, config):
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
-def request_action(action, config, confirmed=False, parameters=None):
+def request_action(action, config, confirmed=False, parameters=None, machine_id=None):
     if action not in ACTIONS:
         raise OperationError("Unknown action")
     if config["demo"]:
@@ -49,7 +67,12 @@ def request_action(action, config, confirmed=False, parameters=None):
     from machines import selected
     try: machine=selected()
     except ValueError:raise OperationError("Machine configuration needs attention") from None
-    parameters=validate_parameters(action,parameters or {})
+    # A confirmation is for the machine it was shown with; never retarget it.
+    if machine_id is not None and machine_id!=machine["id"]:
+        raise OperationError("The selected machine changed; review it and try again")
+    if not supported(action,machine):
+        raise OperationError("This action is not available for "+machine["name"])
+    parameters=validate_parameters(action,parameters or {},machine)
     # Reservation prevents two widgets from starting overlapping workers.
     with admission():
         if busy():
@@ -65,7 +88,7 @@ def request_action(action, config, confirmed=False, parameters=None):
         record(action,"starting","Waiting for the operation to start",startedEpoch=started,
                expiresEpoch=started+120,requestId=request_id,machineId=machine["id"],parameters=parameters)
         try:
-            if action in TERMINAL:
+            if terminal(action,machine):
                 subprocess.Popen(["/usr/bin/omarchy-launch-terminal",*argv,"--interactive"],
                     stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
             else:
@@ -85,11 +108,11 @@ def vm_priv(action):
         raise OperationError("VM operation failed or authentication was cancelled")
 
 
-def write_diagnostics(config):
-    state=collect(config,deep=True)
+def write_diagnostics(config, machine_id=None):
+    state=collect(config,deep=True,machine_id=machine_id)
     # Strict output allowlist: no guest paths, IPs, account IDs, windows or raw logs.
     from core import VERSION
-    report={"version":VERSION,"checkedAt":state["checkedAt"],"state":state["state"],
+    report={"version":VERSION,"machineId":state.get("machineId"),"provider":state.get("provider"),"checkedAt":state["checkedAt"],"state":state["state"],
             "checks":state["checks"],"resources":state["resources"],"capabilities":state["capabilities"],
             "backupCount":len(state["backups"]),"operationStatus":operation().get("status")}
     folder=state_dir()/"reports"
@@ -155,7 +178,8 @@ def backup(config):
     record("backup","running","Backup verified; checking Windows recovery")
     deadline=time.monotonic()+150
     while time.monotonic()<deadline:
-        state=collect(config,deep=True)
+        # Pinned: the panel may switch to another machine during the backup.
+        state=collect(config,deep=True,machine_id="windows")
         if state.get("checks",{}).get("ssh",{}).get("status")=="ready":
             cua=state["checks"].get("cua",{}).get("status")
             return "Backup verified. Windows is ready." if cua=="ready" else "Backup verified. Windows commands work; check desktop tools."
@@ -163,8 +187,100 @@ def backup(config):
     return "Backup verified. Windows was started; its connections are not ready yet."
 
 
-def perform(action, config, parameters=None):
-    parameters=validate_parameters(action,parameters or {})
+def windows_anchor():
+    return Path("/var/lib/omarchy/windows/mounts/users")/str(os.getuid())/"storage"
+
+
+def windows_storage():
+    from machines import windows_machine
+    return Path(windows_machine()["storagePath"])
+
+
+def mount_points():
+    # Field 5 of mountinfo is the mount point, with octal escapes for spaces.
+    # os.path.ismount compares devices, so it misses bind mounts within one
+    # filesystem; the kernel's mount table does not.
+    try:
+        with open("/proc/self/mountinfo") as f:
+            return {re.sub(r"\\([0-7]{3})",lambda m:chr(int(m.group(1),8)),fields[4])
+                    for fields in (line.split() for line in f) if len(fields)>4}
+    except OSError:
+        return set()
+
+
+def windows_storage_attached(anchor):
+    # Mounted, and the mount is this user's Windows storage.
+    if str(anchor) not in mount_points():
+        return False
+    try:
+        return os.path.samefile(windows_storage(),anchor)
+    except OSError:
+        return False
+
+
+def wait_windows_ready(timeout=300):
+    from core import guest_status
+    if not wrapper("windows-vm-ssh"):
+        print("Windows SSH is not configured; allowing two minutes for Windows to finish starting.",flush=True)
+        time.sleep(120)
+        return True
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        try:
+            guest_status()
+            return True
+        except (OperationError,ValueError,OSError):
+            time.sleep(5)
+    return False
+
+
+def attach_windows_storage():
+    # After a host restart, Omarchy recreates its protected storage bind only
+    # in `__priv up`. The root helper requires that bind, so attach it with the
+    # existing lifecycle command. `__priv down` stops the container and keeps
+    # the bind, so the helper then backs up a cleanly shut down Windows.
+    anchor=windows_anchor()
+    # Anything already mounted there takes the normal path; the helper checks
+    # its identity and refuses a wrong one.
+    if not anchor.parent.is_dir() or str(anchor) in mount_points() or windows_reachability({})[0] in ("running","starting"):
+        return False
+    print("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
+    print("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
+    print("down cleanly, then back it up. Windows stays stopped afterwards. sudo may ask for your")
+    print("Omarchy password more than once.\n",flush=True)
+    record("backup","running","Starting Windows to attach its storage")
+    vm_priv("up")
+    error=None
+    try:
+        if not windows_storage_attached(anchor):
+            raise OperationError("Windows storage is still not attached; nothing was backed up")
+        record("backup","running","Waiting for Windows to finish starting")
+        if not wait_windows_ready():
+            raise OperationError("Windows did not finish starting; it was shut down again and nothing was backed up")
+    except OperationError as failure:
+        error=failure
+    record("backup","running","Shutting down Windows before the backup")
+    print("Shutting down Windows before the backup...",flush=True)
+    vm_priv("down")
+    if error:
+        raise error
+    return True
+
+
+def perform(action, config, parameters=None, machine=None):
+    if machine is None:
+        from machines import selected
+        machine=selected()
+    if not supported(action,machine):
+        raise OperationError("This action is not available for "+machine["name"])
+    parameters=validate_parameters(action,parameters or {},machine)
+    if action=="diagnostics":
+        path=write_diagnostics(config,machine["id"])
+        subprocess.Popen(["xdg-open",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        return "Private diagnostic report saved and opened"
+    if omarchy(machine):
+        import omarchy as provider
+        return provider.perform(action,config,parameters,machine)
     if action in ADMIN:return admin_action(action,parameters)
     if action=="open":
         windows=viewer_windows()
@@ -183,7 +299,10 @@ def perform(action, config, parameters=None):
         vm_priv("down")
         return "Windows shut down"
     if action=="backup":
-        if Path("/usr/local/lib/omachines/admin.py").is_file():return admin_action(action,parameters)
+        if Path("/usr/local/lib/omachines/admin.py").is_file():
+            attached=attach_windows_storage()
+            message=admin_action(action,parameters)
+            return message+("; Windows was left stopped, as before the backup" if attached else "")
         return backup(config)
     if action=="console":
         run(["/usr/bin/omarchy-launch-browser","http://127.0.0.1:8006"],8)
@@ -230,18 +349,13 @@ def perform(action, config, parameters=None):
         subprocess.Popen(['xdg-open',path],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return 'Rehearsal image opened; review the Windows boot before recording success'
     if action=="connections":
-        from machines import selected
-        m=selected();folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
+        m=machine;folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/'connections.txt'
         text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
         fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'w') as f:f.write(text)
         subprocess.Popen(['xdg-open',str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return 'Private connection instructions opened'
-    if action=="diagnostics":
-        path=write_diagnostics(config)
-        subprocess.Popen(["xdg-open",str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-        return "Private diagnostic report saved and opened"
     raise OperationError("Unknown action")
 
 
@@ -260,10 +374,13 @@ def worker(action, request_id, interactive=False):
                         or not reservation_fresh(reservation)):
                     raise OperationError("This operation request expired or was superseded; request it again")
                 config=settings()
-                from machines import selected
+                from machines import get
                 try:
-                    if selected()['id']!=reservation.get('machineId','windows'):
-                        raise ValueError('Machine changed')
+                    # Pinned to the machine it was requested for, even if the
+                    # panel switched machines while the worker was starting.
+                    machine=get(reservation.get('machineId','windows'))
+                    if not supported(action,machine):
+                        raise ValueError('Unsupported action')
                 except ValueError:
                     record(action,'failed','Machine configuration changed; request the action again')
                     raise OperationError('Machine configuration changed; request the action again') from None
@@ -280,9 +397,9 @@ def worker(action, request_id, interactive=False):
                 print(str(error),flush=True)
             return 1
         try:
-            message=perform(action,config,reservation.get("parameters",{}))
+            message=perform(action,config,reservation.get("parameters",{}),machine)
             record(action,"complete",message)
-            if action in TERMINAL or action=="diagnostics":
+            if action in TERMINAL or action in ("diagnostics","backup","verify","allocate"):
                 notify(message,config)
             if interactive:
                 print("\n"+message,flush=True)
@@ -300,12 +417,13 @@ def worker(action, request_id, interactive=False):
             return 1
 
 
-def validate_parameters(action, values):
+def validate_parameters(action, values, machine=None):
     if not isinstance(values,dict):raise OperationError('Invalid action parameters')
     result={}
     if action in ('verify','rehearse','restore','label'):
         name=values.get('backupId','')
-        if not isinstance(name,str) or not re.fullmatch(r'(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?',name):raise OperationError('Select a backup first')
+        pattern=BACKUP_IDS[machine["provider"] if machine else "omarchy-windows"]
+        if not isinstance(name,str) or not re.fullmatch(pattern,name):raise OperationError('Select a backup first')
         result['backupId']=name
     if action=='label':
         label=values.get('label','')

@@ -4,6 +4,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import ".." as App
+import "../Model.js" as Model
 
 Window {
   visible: true
@@ -21,13 +22,14 @@ Window {
     App.MachineView {
     id: view
     width: 430
-    machine: ({state:"running",summary:"Windows is ready",checks:{},resources:{cpu:4,memoryBytes:8589934592},capabilities:{viewer:true,ssh:true,cua:true,aside:true,omarchy:true,backup:true},backups:[],operation:{}})
+    machine: ({state:"running",summary:"Windows is ready",checks:{},resources:{cpu:4,memoryBytes:8589934592},capabilities:{viewer:true,ssh:true,cua:true,aside:true,omarchy:true,lifecycle:true,backup:true,shared:true,console:true,handoff:true,asideSupported:true,catalogue:true,rehearsal:true,rollback:true},backups:[],operation:{}})
     onConfirmationClosed: keys.forceActiveFocus()
     }
   }
   SignalSpy { id: actionSpy; target: view; signalName: "actionRequested" }
   SignalSpy { id: settingsSpy; target: view; signalName: "settingsChanged" }
   SignalSpy { id: closeSpy; target: keys; signalName: "closeRequested" }
+  SignalSpy { id: selectSpy; target: view; signalName: "machineSelected" }
   Timer { running: true; interval: 500; onTriggered: tests.qtest_run() }
   TestCase {
     id: tests
@@ -36,9 +38,95 @@ Window {
     onCompletedChanged: if (completed) console.log("OMACHINES_TEST_RESULT", qtest_results.failCount, qtest_results.passCount)
     function cleanup() { if (qtest_results.failed) console.error("FAILED TEST",qtest_results.functionName) }
     function init() {
-      view.machine={state:"running",summary:"Windows is ready",checks:{},resources:{cpu:4,memoryBytes:8589934592},capabilities:{viewer:true,ssh:true,cua:true,aside:true,omarchy:true,backup:true},backups:[],operation:{}}
+      view.machine={state:"running",summary:"Windows is ready",name:"Windows 11",provider:"omarchy-windows",machineId:"windows",checks:{},resources:{cpu:4,memoryBytes:8589934592},capabilities:{viewer:true,ssh:true,cua:true,aside:true,omarchy:true,lifecycle:true,backup:true,shared:true,console:true,handoff:true,asideSupported:true,catalogue:true,rehearsal:true,rollback:true},backups:[],operation:{}}
       view.config={asideEnabled:true,notify:true,pollSeconds:120}
-      view.section = "Overview"; view.reset(); keys.forceActiveFocus(); actionSpy.clear(); settingsSpy.clear(); closeSpy.clear()
+      view.section = "Overview"; view.reset(); keys.forceActiveFocus(); actionSpy.clear(); settingsSpy.clear(); closeSpy.clear(); selectSpy.clear()
+    }
+    readonly property var both: [{id:"windows",name:"Windows 11",provider:"omarchy-windows",state:"running",active:true,summary:"Windows is ready"},{id:"omarchy",name:"Omarchy VM",provider:"omarchy-qemu",state:"stopped",active:false,summary:"Omarchy VM is stopped"}]
+    function omarchyMachine(extra) {
+      return Object.assign({state:"running",summary:"Omarchy VM is ready",name:"Omarchy VM",provider:"omarchy-qemu",machineId:"omarchy",checks:{},resources:{cpu:6,memoryBytes:8589934592},
+        capabilities:{viewer:true,lifecycle:true,ssh:true,cua:true,shared:true,backup:true,verify:true,restore:true,allocate:true,aside:false,asideSupported:false,console:false,handoff:false,admin:false,catalogue:false,rehearsal:false,rollback:false},
+        backups:[{id:"omarchy-20261026T205001Z",label:"Fresh install",createdAt:"2026-10-26T20:50:40Z",verified:true,restoreTested:true}],operation:{},
+        machines:[Object.assign({},both[0],{state:"stopped",active:false}),Object.assign({},both[1],{state:"running",active:true})]}, extra || {})
+    }
+    function chip(label) {
+      var switcher=findChild(view,"machine-switcher")
+      for (var i=0;i<switcher.children.length;i++) if (String(switcher.children[i].text || "").indexOf(label)===0) return switcher.children[i]
+      return null
+    }
+    function actionNames(section) { view.section=section; return view.actions.map(function(a){return a.action}) }
+    function test_switcher_hidden_for_one_machine() {
+      view.machine=Object.assign({},view.machine,{machines:[both[0]]})
+      verify(!findChild(view,"machine-switcher").visible)
+      keyClick(Qt.Key_M);compare(selectSpy.count,0)
+      verify(findChild(view,"key-hint").text.indexOf("M machine")<0)
+    }
+    function test_switcher_click_and_m_key_select_machine() {
+      view.machine=Object.assign({},view.machine,{machines:both})
+      verify(findChild(view,"machine-switcher").visible)
+      verify(findChild(view,"key-hint").text.indexOf("M machine")>=0)
+      var target=chip("Omarchy VM");verify(target!==null);compare(target.text,"Omarchy VM · Off")
+      wait(30);mouseClick(target);compare(selectSpy.count,1);compare(selectSpy.signalArguments[0][0],"omarchy")
+      mouseClick(chip("Windows 11"));compare(selectSpy.count,1)
+      tryCompare(keys,"activeFocus",true);keyClick(Qt.Key_M)
+      compare(selectSpy.count,2);compare(selectSpy.signalArguments[1][0],"omarchy");compare(actionSpy.count,0)
+    }
+    function test_switching_machine_clears_confirmation() {
+      view.machine=Object.assign({},view.machine,{machines:both})
+      openConfirmation();view.machine=omarchyMachine()
+      compare(view.confirmation,"");compare(actionSpy.count,0);compare(view.cursorIndex,0)
+      activateNextAction()
+    }
+    function test_omarchy_hides_windows_only_controls() {
+      view.machine=omarchyMachine()
+      compare(actionNames("Overview"),["open","shared","start","stop"])
+      compare(actionNames("Agents"),["refresh","connections","diagnostics"])
+      compare(actionNames("Backups"),["backup"])
+      verify(!findChild(view,"rehearse-backup").visible)
+      compare(findChild(view,"restore-backup").text,"Restore Omarchy VM from this backup…")
+      verify(findChild(view,"restore-backup").enabled);verify(findChild(view,"verify-backup").enabled)
+      compare(Model.agentChecks(view.machine,true),["ssh","desktop","cua"])
+      verify(view.actions.every(function(a){return a.label.indexOf("Windows")<0 && a.detail.indexOf("Windows")<0}))
+      view.section="Settings";verify(findChild(view,"apply-allocation").enabled)
+    }
+    function test_windows_keeps_its_controls() {
+      view.machine=Object.assign({},view.machine,{capabilities:Object.assign({},view.machine.capabilities,{admin:true})})
+      compare(actionNames("Agents"),["refresh","handoff","console","connections","inspect","diagnostics"])
+      verify(actionNames("Overview").indexOf("aside")>=0)
+      view.section="Backups";verify(findChild(view,"rehearse-backup").visible)
+    }
+    function test_omarchy_confirmation_names_machine_and_pins_it() {
+      view.machine=omarchyMachine()
+      view.choose(view.actions.filter(function(a){return a.action === "stop"})[0])
+      tryVerify(function(){return findChild(view,"cancel-action").activeFocus})
+      verify(findChild(view,"confirmation-text").text.indexOf("Shut down Omarchy VM?")===0)
+      keyClick(Qt.Key_Return);compare(actionSpy.count,0)
+      view.section="Backups";view.choose(view.actions[0])
+      verify(findChild(view,"confirmation-text").text.indexOf("No password is needed")>=0)
+      findChild(view,"confirm-action").forceActiveFocus();keyClick(Qt.Key_Return)
+      compare(actionSpy.count,1);compare(actionSpy.signalArguments[0][0],"backup");compare(actionSpy.signalArguments[0][3],"omarchy")
+    }
+    function test_operation_of_other_machine_is_named() {
+      view.machine=omarchyMachine({operation:{status:"running",action:"backup",machineId:"windows",message:"Copying Windows storage"}})
+      compare(findChild(view,"operation-message").text,"In progress: Windows 11: Copying Windows storage")
+      view.activate();compare(actionSpy.count,0)
+      view.machine=omarchyMachine({operation:{status:"complete",action:"stop",machineId:"windows",message:"Windows shut down"}})
+      verify(!findChild(view,"operation-message").visible)
+      view.machine=omarchyMachine({operation:{status:"failed",action:"backup",machineId:"windows",message:"Backup failed"}})
+      verify(findChild(view,"operation-message").visible)
+      view.machine=omarchyMachine({operation:{status:"complete",action:"stop",machineId:"omarchy",message:"Omarchy VM shut down"}})
+      verify(findChild(view,"operation-message").visible)
+    }
+    function test_bar_text_shows_each_running_vm() {
+      var state={machines:both,operation:{}}
+      compare(Model.barText({machines:[]},false,true),"󰍹 VM")
+      compare(Model.barText(state,false,true),"󰍹 VM \uf17a")
+      state.machines=[both[0],Object.assign({},both[1],{active:true})]
+      compare(Model.barText(state,false,true),"󰍹 VM \uf17a \uf303")
+      compare(Model.barText(state,true,true),"\uf17a\n\uf303")
+      compare(Model.barText({machines:[Object.assign({},both[0],{active:false})],operation:{status:"running"}},false,true),"󰍹 VM…")
+      compare(Model.barText({machines:[]},false,false),"󰍹")
+      compare(Model.tooltip(state),"Windows 11: Windows is ready · Omarchy VM: Omarchy VM is stopped")
     }
     function openConfirmation() {
       view.choose(view.actions.filter(function(a){return a.action === "stop"})[0])
@@ -140,7 +228,7 @@ Window {
     }
     function test_cancel_preserves_machine() {
       view.section="Backups";view.choose(view.actions[0]);compare(view.confirmation,"backup")
-      mouseClick(findChild(view,"cancel-action"));compare(view.confirmation,"");compare(actionSpy.count,0)
+      wait(30);mouseClick(findChild(view,"cancel-action"));compare(view.confirmation,"");compare(actionSpy.count,0)
     }
     function test_demo_disables_actions() {
       var original=view.machine;view.machine=Object.assign({},original,{demo:true})

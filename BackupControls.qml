@@ -18,6 +18,8 @@ Column {
   readonly property var records: machine.backups || []
   readonly property var selected: records.filter(function(r) { return root.idFor(r) === root.backupId })[0] || ({})
   readonly property bool editing: selector.popupOpen || nameField.activeFocus
+  readonly property var caps: machine.capabilities || ({})
+  readonly property string machineName: Model.name(machine)
   signal request(string action, var parameters)
   signal editingFinished()
   function focusEntry() { nameField.forceActiveFocus() }
@@ -34,7 +36,7 @@ Column {
     width: parent.width
     label: "Backup"
     value: root.backupId
-    options: root.records.map(function(r) { return {value:root.idFor(r),label:(r.label || "Windows backup") + " · " + new Date(r.createdAt).toLocaleDateString()} })
+    options: root.records.map(function(r) { return {value:root.idFor(r),label:(r.label || "Backup") + " · " + new Date(r.createdAt).toLocaleDateString()} })
     foreground: root.foreground; fontFamily: root.fontFamily
     onChanged: function(value) { root.backupId=value }
     onPopupOpenChanged: if (!popupOpen) root.editingFinished()
@@ -51,27 +53,29 @@ Column {
   Row {
     spacing: root.spacingTokens.controlGap
     Button { text:"Save name"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && nameField.text.trim()!==""; onClicked:root.request("label",{backupId:root.backupId,label:nameField.text}) }
-    Button { text:"Verify integrity"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!(root.machine.capabilities || {}).admin; onClicked:root.request("verify",{backupId:root.backupId}) }
+    Button { objectName:"verify-backup"; text:"Verify integrity"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!root.caps.verify; onClicked:root.request("verify",{backupId:root.backupId}) }
   }
   Text {
     width:parent.width; textFormat:Text.PlainText; wrapMode:Text.WordWrap
     color:root.foreground; font.family:root.fontFamily; font.pixelSize:root.fontTokens.bodySmall
-    text: !root.backupId ? "Refresh the backup catalogue to find existing backups." :
+    text: !root.backupId ? (root.caps.catalogue === true ? "Refresh the backup catalogue to find existing backups." : "No backups yet. Create one above.") :
       (root.selected.bytes ? Model.gib(root.selected.bytes)+" · " : "") + new Date(root.selected.createdAt).toLocaleString() + "\n" +
       (root.selected.verified ? (root.selected.verifiedAt ? "Integrity verified" : "Verified by existing setup record") : "Integrity not verified") + (root.selected.verifiedAt ? " · "+new Date(root.selected.verifiedAt).toLocaleString() : "") + "\n" +
-      (root.selected.restoreTested ? "Offline restore boot reviewed" : "Restore boot not yet reviewed")
+      (root.caps.rehearsal === true ? (root.selected.restoreTested ? "Offline restore boot reviewed" : "Restore boot not yet reviewed") :
+        (root.selected.restoreTested ? "Restore tested" + (root.selected.restoreTestedAt ? " · " + new Date(root.selected.restoreTestedAt).toLocaleString() : "") : "Restore not yet tested"))
   }
-  Button { width:parent.width; text:"Test an offline restored copy…"; bordered:true; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!(root.machine.capabilities || {}).admin; onClicked:root.request("rehearse",{backupId:root.backupId}) }
-  Button { width:parent.width; text:"Restore Windows from this backup…"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!(root.machine.capabilities || {}).admin; onClicked:root.request("restore",{backupId:root.backupId}) }
-  Button { width:parent.width; visible:["prepared","restored","needs-attention","rollback-switching"].indexOf((root.machine.recovery || {}).status)>=0; text:"Return to previous Windows storage…"; focusable:true; foreground:root.foreground; onClicked:root.request("rollback",{}) }
+  Button { objectName:"rehearse-backup"; width:parent.width; visible:root.caps.rehearsal === true; text:"Test an offline restored copy…"; bordered:true; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!root.caps.admin; onClicked:root.request("rehearse",{backupId:root.backupId}) }
+  Button { objectName:"restore-backup"; width:parent.width; text:"Restore " + root.machineName + " from this backup…"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!root.caps.restore; onClicked:root.request("restore",{backupId:root.backupId}) }
+  Button { width:parent.width; visible:root.caps.rollback === true && ["prepared","restored","needs-attention","rollback-switching"].indexOf((root.machine.recovery || {}).status)>=0; text:"Return to previous Windows storage…"; focusable:true; foreground:root.foreground; onClicked:root.request("rollback",{}) }
   Text {
     width:parent.width; textFormat:Text.PlainText; wrapMode:Text.WordWrap
     color:root.foreground; opacity:0.75; font.family:root.fontFamily; font.pixelSize:root.fontTokens.caption
-    text:"Restore replaces Windows files, accounts and installed apps with the selected backup. Disk, TPM and firmware are restored together; the previous storage is retained. Current host connections and CPU/RAM settings stay in place. Shared files are separate."
+    text:Model.isOmarchy(root.machine) ? "Restore replaces " + root.machineName + "’s disk and firmware variables, including its files, accounts and installed apps. The current disk is kept aside next to the VM storage. Shared files and CPU/RAM settings are separate." :
+      "Restore replaces Windows files, accounts and installed apps with the selected backup. Disk, TPM and firmware are restored together; the previous storage is retained. Current host connections and CPU/RAM settings stay in place. Shared files are separate."
   }
   Column {
     width:parent.width; spacing:root.spacingTokens.controlGap
-    visible:!!(root.machine.rehearsal || {}).status
+    visible:root.caps.rehearsal === true && !!(root.machine.rehearsal || {}).status
     Text { width:parent.width; wrapMode:Text.WordWrap; textFormat:Text.PlainText; color:root.foreground; font.family:root.fontFamily; font.pixelSize:root.fontTokens.bodySmall; text:"Offline rehearsal: "+((root.machine.rehearsal || {}).status || "") }
     Button { text:"Open rehearsal image"; focusable:true; foreground:root.foreground; enabled:!!(root.machine.rehearsal || {}).screenshot; onClicked:root.request("rehearsal-image",{}) }
     Row {
