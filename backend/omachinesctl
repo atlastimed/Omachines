@@ -51,7 +51,7 @@ def daemon():
     selector=selectors.DefaultSelector()
     selector.register(sys.stdin,selectors.EVENT_READ)
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    snapshot={"state":"checking","summary":"Checking Windows","checks":{},"resources":{},"backups":[],"operation":{},"capabilities":{}}
+    snapshot={"state":"checking","summary":"Checking machines","checks":{},"resources":{},"backups":[],"operation":{},"capabilities":{},"machines":[]}
     pending=None
     due=0
     deep_due=0

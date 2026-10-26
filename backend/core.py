@@ -241,7 +241,7 @@ def operation():
         else:
             alive = alive and operation_locked()
         if not alive:
-            value = {**value, "status": "interrupted", "message": "Operation interrupted. Check Windows and the backup terminal before retrying."}
+            value = {**value, "status": "interrupted", "message": "Operation interrupted. Check the VM and the operation terminal before retrying."}
     return value
 
 
