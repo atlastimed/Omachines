@@ -10,7 +10,7 @@ import time
 import uuid
 
 from core import (ROOT, OperationError, admission, backups, busy, check, collect, now, operation, read_json,
-                  reservation_fresh, run, settings, state_dir, viewer_windows, wrapper, write_json)
+                  reservation_fresh, run, settings, state_dir, viewer_windows, windows_reachability, wrapper, write_json)
 from mcp import Client
 
 ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections"}
@@ -186,6 +186,57 @@ def backup(config):
     return "Backup verified. Windows was started; its connections are not ready yet."
 
 
+def windows_anchor():
+    return Path("/var/lib/omarchy/windows/mounts/users")/str(os.getuid())/"storage"
+
+
+def wait_windows_ready(timeout=300):
+    from core import guest_status
+    if not wrapper("windows-vm-ssh"):
+        print("Windows SSH is not configured; allowing two minutes for Windows to finish starting.",flush=True)
+        time.sleep(120)
+        return True
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        try:
+            guest_status()
+            return True
+        except (OperationError,ValueError,OSError):
+            time.sleep(5)
+    return False
+
+
+def attach_windows_storage():
+    # After a host restart, Omarchy recreates its protected storage bind only
+    # in `__priv up`. The root helper requires that bind, so attach it with the
+    # existing lifecycle command. `__priv down` stops the container and keeps
+    # the bind, so the helper then backs up a cleanly shut down Windows.
+    anchor=windows_anchor()
+    if not anchor.parent.is_dir() or os.path.ismount(anchor) or windows_reachability({})[0] in ("running","starting"):
+        return False
+    print("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
+    print("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
+    print("down cleanly, then back it up. Windows stays stopped afterwards. sudo may ask for your")
+    print("Omarchy password more than once.\n",flush=True)
+    record("backup","running","Starting Windows to attach its storage")
+    vm_priv("up")
+    error=None
+    try:
+        if not os.path.ismount(anchor):
+            raise OperationError("Windows storage is still not attached; nothing was backed up")
+        record("backup","running","Waiting for Windows to finish starting")
+        if not wait_windows_ready():
+            raise OperationError("Windows did not finish starting; it was shut down again and nothing was backed up")
+    except OperationError as failure:
+        error=failure
+    record("backup","running","Shutting down Windows before the backup")
+    print("Shutting down Windows before the backup...",flush=True)
+    vm_priv("down")
+    if error:
+        raise error
+    return True
+
+
 def perform(action, config, parameters=None, machine=None):
     if machine is None:
         from machines import selected
@@ -218,7 +269,10 @@ def perform(action, config, parameters=None, machine=None):
         vm_priv("down")
         return "Windows shut down"
     if action=="backup":
-        if Path("/usr/local/lib/omachines/admin.py").is_file():return admin_action(action,parameters)
+        if Path("/usr/local/lib/omachines/admin.py").is_file():
+            attached=attach_windows_storage()
+            message=admin_action(action,parameters)
+            return message+("; Windows was left stopped, as before the backup" if attached else "")
         return backup(config)
     if action=="console":
         run(["/usr/bin/omarchy-launch-browser","http://127.0.0.1:8006"],8)

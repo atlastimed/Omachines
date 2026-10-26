@@ -1,4 +1,4 @@
-"""Version 0.3: machine registry and Omarchy VM provider.
+"""Version 0.3: machine registry, Omarchy VM provider and Windows storage anchor.
 
 Fixtures never run omarchy-vm, SSH, sudo or Docker, and never touch a real VM.
 """
@@ -430,6 +430,82 @@ class OperationTests(Base):
         text = omarchy.guide(machines.omarchy_machine())
         for value in ("omarchy-vm-ssh", "omarchy-vm-mcp", "passwordless sudo", "not on this host", "OmarchyVM"):
             self.assertIn(value, text)
+
+
+class WindowsAnchorTests(Base):
+    """After a host restart the protected storage bind is missing until __priv up."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.anchor = self.path/"mounts/users/1000/storage"; self.anchor.mkdir(parents=True)
+        self.patch(patch("operations.windows_anchor", return_value=self.anchor))
+        self.mounted = [False]
+        self.patch(patch("operations.os.path.ismount", side_effect=lambda p: self.mounted[0]))
+        self.events = []
+        def priv(action):
+            self.events.append(action)
+            if action == "up": self.mounted[0] = True
+        self.priv = self.patch(patch("operations.vm_priv", side_effect=priv))
+        self.ready = self.patch(patch("operations.wait_windows_ready", return_value=True))
+        self.admin = self.patch(patch("operations.admin_action", side_effect=lambda *a: self.events.append("admin") or "Complete backup saved and verified"))
+        self.patch(patch("operations.windows_reachability", return_value=("unreachable", "Windows is not reachable")))
+        helper = Mock(); helper.is_file.return_value = True
+        real = Path
+        self.patch(patch("operations.Path", side_effect=lambda *a: helper if a == ("/usr/local/lib/omachines/admin.py",) else real(*a)))
+        self.windows = machines.windows_machine()
+
+    def backup(self):
+        return operations.perform("backup", {"demo": False}, {}, self.windows)
+
+    def test_missing_anchor_starts_waits_stops_then_backs_up(self):
+        message = self.backup()
+        self.assertEqual(self.events, ["up", "down", "admin"])
+        self.ready.assert_called_once()
+        self.assertIn("left stopped", message)
+
+    def test_mounted_anchor_uses_normal_backup(self):
+        self.mounted[0] = True
+        self.assertEqual(self.backup(), "Complete backup saved and verified")
+        self.assertEqual(self.events, ["admin"])
+
+    def test_running_windows_or_unsupported_layout_is_not_restarted(self):
+        with patch("operations.windows_reachability", return_value=("running", "Windows is reachable")):
+            self.backup()
+        self.anchor.rmdir(); self.anchor.parent.rmdir()
+        self.backup()
+        self.assertEqual(self.events, ["admin", "admin"])
+
+    def test_not_ready_is_shut_down_and_not_backed_up(self):
+        self.ready.return_value = False
+        with self.assertRaisesRegex(core.OperationError, "did not finish starting"): self.backup()
+        self.assertEqual(self.events, ["up", "down"])
+
+    def test_still_unmounted_after_start_is_shut_down(self):
+        self.priv.side_effect = lambda action: self.events.append(action)
+        with self.assertRaisesRegex(core.OperationError, "still not attached"): self.backup()
+        self.assertEqual(self.events, ["up", "down"])
+        self.ready.assert_not_called()
+
+    def test_cancelled_authorization_changes_nothing(self):
+        self.priv.side_effect = core.OperationError("VM operation failed or authentication was cancelled")
+        with self.assertRaisesRegex(core.OperationError, "cancelled"): self.backup()
+        self.priv.assert_called_once_with("up")
+        self.admin.assert_not_called()
+
+
+class ReadinessTests(unittest.TestCase):
+    def test_wait_returns_after_ssh_answers(self):
+        with patch("operations.wrapper", return_value="ssh"), patch("core.guest_status", side_effect=[core.OperationError("x"), {"desktop": "available"}]), \
+                patch("operations.time.sleep") as sleep:
+            self.assertTrue(operations.wait_windows_ready())
+        sleep.assert_called_once_with(5)
+
+    def test_wait_is_bounded(self):
+        clock = iter(range(0, 10000, 100))
+        with patch("operations.wrapper", return_value="ssh"), patch("core.guest_status", side_effect=core.OperationError("x")), \
+                patch("operations.time.sleep"), patch("operations.time.monotonic", side_effect=lambda: next(clock)):
+            self.assertFalse(operations.wait_windows_ready(300))
 
 
 if __name__ == "__main__":
