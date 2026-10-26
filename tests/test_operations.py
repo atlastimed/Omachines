@@ -40,7 +40,7 @@ class OperationsTests(unittest.TestCase):
         self.assertIn(token, self.launch.call_args.args[0])
         self.assertEqual(operations.worker("stop", token), 0)
         self.assertEqual(operations.worker("stop", token), 1)
-        self.perform.assert_called_once_with("stop", self.config)
+        self.perform.assert_called_once_with("stop", self.config, {})
 
     def test_worker_starting_before_launcher_returns_waits_for_admission(self):
         threads, results = [], []
@@ -73,7 +73,7 @@ class OperationsTests(unittest.TestCase):
         current = core.operation()
         self.assertEqual(operations.worker("stop", old), 1)
         self.assertEqual(core.operation(), current)
-        self.perform.assert_called_once_with("start", self.config)
+        self.perform.assert_called_once_with("start", self.config, {})
 
     def test_wrong_action_or_identity_does_not_consume_request(self):
         token = self.reserve()

@@ -1,6 +1,7 @@
 import QtQuick
 import QtTest
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import ".." as App
 
@@ -11,10 +12,11 @@ Window {
   PanelKeyCatcher {
     id: keys
     anchors.fill: parent
-    blocked: view.confirmation !== ""
+    blocked: view.confirmation !== "" || view.editing
     onMoveRequested: function(dx,dy) { view.moveCursor(dx,dy) }
     onActivateRequested: view.activate()
     onTextKey: function(key) { view.textKey(key) }
+    onTabRequested: view.focusEditor()
     Keys.onEscapePressed: { if (view.confirmation) view.confirmation = ""; else keys.closeRequested() }
     App.MachineView {
     id: view
@@ -78,11 +80,48 @@ Window {
       view.choose(view.actions.filter(function(a){return a.action === "stop"})[0]);view.reset()
       wait(30);activateNextAction()
     }
+    function test_backup_name_editor_keeps_shortcuts_as_text() {
+      view.machine=Object.assign({},view.machine,{capabilities:{admin:true},backups:[{id:"omachines-20260101T000000Z-abcdef",label:"Saved Windows",createdAt:"2026-01-01T00:00:00Z"}]})
+      view.section="Backups";keyClick(Qt.Key_Tab)
+      var field=findChild(view,"backup-name")
+      tryCompare(field,"activeFocus",true);verify(view.editing)
+      field.selectAll();keyClick(Qt.Key_R);keyClick(Qt.Key_1);keyClick(Qt.Key_4)
+      compare(field.text,"r14");compare(view.section,"Backups");compare(actionSpy.count,0)
+      keyClick(Qt.Key_Return)
+      compare(actionSpy.count,1);compare(actionSpy.signalArguments[0][0],"label")
+      compare(actionSpy.signalArguments[0][2].label,"r14")
+      tryCompare(keys,"activeFocus",true)
+    }
+    function test_resource_editor_keeps_number_keys() {
+      view.machine=Object.assign({},view.machine,{capabilities:{admin:true},host:{cpu:16,memoryBytes:34359738368},allocation:{cpu:4,ram:"8G"}})
+      view.section="Settings";keyClick(Qt.Key_Tab)
+      var field=findChild(view,"allocation-cpu").field
+      tryVerify(function(){return view.editing})
+      field.contentItem.forceActiveFocus();field.contentItem.selectAll();keyClick(Qt.Key_6);keyClick(Qt.Key_Tab)
+      compare(view.section,"Settings");compare(field.value,6);compare(actionSpy.count,0)
+    }
+    function test_restore_confirmation_pins_selected_backup() {
+      var parameters={backupId:"omachines-20260101T000000Z-abcdef"}
+      view.choose({enabled:true,action:"restore",parameters:parameters})
+      parameters.backupId="omachines-20260102T000000Z-abcdef"
+      tryVerify(function(){return findChild(view,"cancel-action").activeFocus})
+      findChild(view,"confirm-action").forceActiveFocus();keyClick(Qt.Key_Return)
+      compare(actionSpy.count,1)
+      compare(actionSpy.signalArguments[0][2].backupId,"omachines-20260101T000000Z-abcdef")
+    }
+    function test_resource_confirmation_is_cancel_first_and_busy_safe() {
+      view.choose({enabled:true,action:"allocate",parameters:{cpu:6,ram:8}})
+      tryVerify(function(){return findChild(view,"cancel-action").activeFocus})
+      keyClick(Qt.Key_Return);compare(actionSpy.count,0)
+      view.choose({enabled:true,action:"allocate",parameters:{cpu:6,ram:8}})
+      view.machine=Object.assign({},view.machine,{operation:{status:"running"}})
+      compare(view.confirmation,"");compare(actionSpy.count,0)
+    }
     function test_theme_tokens_react() {
-      var old=Color.shellValues
-      Color.shellValues={"popups.text":"#111111"};compare(view.foreground.toString(),"#111111")
-      Color.shellValues={"popups.text":"#eeeeee"};compare(view.foreground.toString(),"#eeeeee")
-      Color.shellValues=old
+      var old=Commons.Color.shellValues
+      Commons.Color.shellValues={"popups.text":"#111111"};compare(view.foreground.toString(),"#111111")
+      Commons.Color.shellValues={"popups.text":"#eeeeee"};compare(view.foreground.toString(),"#eeeeee")
+      Commons.Color.shellValues=old
     }
     function test_sections_and_keyboard_cursor() {
       view.moveCursor(1,0); compare(view.section,"Agents")

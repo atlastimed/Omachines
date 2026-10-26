@@ -2,10 +2,11 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 
 RowLayout {
   id: root
-  readonly property var popupTokens: Color.popups
+  readonly property var popupTokens: Commons.Color.popups
   readonly property var fontTokens: Style.font
   readonly property var spacingTokens: Style.spacing
   property string label: ""
@@ -41,7 +42,7 @@ RowLayout {
       width: parent.width
       textFormat: Text.PlainText
       text: root.detail
-      color: Color.muted
+      color: Commons.Color.muted
       font.family: root.fontFamily
       font.pixelSize: root.fontTokens.caption
       wrapMode: Text.WordWrap

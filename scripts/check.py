@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate locally without reading Windows, changing settings or stopping VMs."""
 import os
+import json
 import re
 import shutil
 from pathlib import Path
@@ -23,7 +24,14 @@ run('omarchy','plugin','validate',ROOT)
 with tempfile.TemporaryDirectory(prefix='omachines-qt-') as tmp:
     imports=Path(tmp)
     (imports/'qs').symlink_to(SHELL,target_is_directory=True)
-    run('/usr/lib/qt6/bin/qmllint','--unqualified','info','--max-warnings','0','-I',imports,*sorted(ROOT.glob('*.qml')))
+    lint=subprocess.run(['/usr/lib/qt6/bin/qmllint','--json','-','--unqualified','info','--max-warnings','0','-I',str(imports),*map(str,sorted(ROOT.glob('*.qml')))],capture_output=True,text=True)
+    # Some Qt releases omit warnings from human-readable output while still
+    # failing --max-warnings. JSON is the stable diagnostic source.
+    diagnostics=json.loads(lint.stdout)
+    for file in diagnostics['files']:
+        for warning in file.get('warnings',[]):
+            print(f"{file['filename']}:{warning.get('line',0)}: {warning['type']}: {warning['message']}")
+    if lint.returncode:raise SystemExit('QML lint failed')
     qtenv={**env,'QML_IMPORT_PATH':str(imports),'QT_QPA_PLATFORM':'offscreen','QT_QPA_PLATFORMTHEME':'','QT_QUICK_BACKEND':'software','QT_QUICK_CONTROLS_STYLE':'Basic'}
     # Quickshell registers its native types in its executable, not loadable Qt
     # plugins. Run QtTest inside qs and explicitly start its test case schedule.

@@ -19,6 +19,8 @@ class ResponseTests(unittest.TestCase):
         self.patch(patch("core.tcp", return_value=True))
         self.patch(patch("core.capabilities", return_value={"ssh":True,"cua":True,"aside":False}))
         self.guest = self.patch(patch("core.guest_status", return_value={"desktop":"available","cpu":4}))
+        self.patch(patch('core.aside_cli_status',return_value={'installed':True,'version':'1.2.3','authentication':'unknown'}))
+        self.patch(patch('core.run',side_effect=AssertionError('Unmocked external command in response fixture')))
         self.client = self.patch(patch("core.Client")).return_value.__enter__.return_value
         self.client.call.return_value = {"structuredContent":{"schema_version":"1","overall":"ok"}}
         self.config = core.settings()
