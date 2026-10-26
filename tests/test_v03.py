@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, mock_open, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/"backend"))
@@ -471,7 +471,11 @@ class WindowsAnchorTests(Base):
         self.anchor = self.path/"mounts/uid-1000/storage"; self.anchor.mkdir(parents=True)
         self.patch(patch("operations.windows_anchor", return_value=self.anchor))
         self.mounted = [False]
-        self.patch(patch("operations.os.path.ismount", side_effect=lambda p: self.mounted[0]))
+        # Mounts come from the kernel table; the storage is the anchor itself,
+        # so identity holds unless a test points it elsewhere.
+        self.patch(patch("operations.mount_points", side_effect=lambda: {str(self.anchor)} if self.mounted[0] else set()))
+        self.storage = self.patch(patch("operations.windows_storage", return_value=self.anchor))
+        self.patch(patch("operations.os.path.ismount", side_effect=AssertionError("ismount misses same-filesystem binds")))
         self.events = []
         def priv(action):
             self.events.append(action)
@@ -517,11 +521,44 @@ class WindowsAnchorTests(Base):
         self.assertEqual(self.events, ["up", "down"])
         self.ready.assert_not_called()
 
+    def test_attached_storage_with_wrong_identity_is_shut_down(self):
+        other = self.path/"other"; other.mkdir()
+        self.storage.return_value = other
+        with self.assertRaisesRegex(core.OperationError, "still not attached"): self.backup()
+        self.assertEqual(self.events, ["up", "down"])
+        self.ready.assert_not_called()
+
     def test_cancelled_authorization_changes_nothing(self):
         self.priv.side_effect = core.OperationError("VM operation failed or authentication was cancelled")
         with self.assertRaisesRegex(core.OperationError, "cancelled"): self.backup()
         self.priv.assert_called_once_with("up")
         self.admin.assert_not_called()
+
+
+class MountTableTests(unittest.TestCase):
+    TABLE = ("36 25 0:32 / / rw - btrfs /dev/root rw\n"
+             "90 36 0:32 /home/example/.windows /var/lib/omarchy/windows/mounts/anchor/storage rw - btrfs /dev/root rw\n"
+             "91 36 0:32 /x /mnt/with\\040space rw - btrfs /dev/root rw\n")
+
+    def test_same_filesystem_bind_is_found_and_escapes_decoded(self):
+        with patch("operations.open", mock_open(read_data=self.TABLE), create=True):
+            points = operations.mount_points()
+        self.assertIn("/var/lib/omarchy/windows/mounts/anchor/storage", points)
+        self.assertIn("/mnt/with space", points)
+        with patch("operations.open", side_effect=OSError, create=True):
+            self.assertEqual(operations.mount_points(), set())
+
+    def test_attached_requires_the_mount_and_the_storage_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, other = Path(tmp)/"storage", Path(tmp)/"other"
+            storage.mkdir(); other.mkdir()
+            with patch("operations.windows_storage", return_value=storage):
+                with patch("operations.mount_points", return_value=set()):
+                    self.assertFalse(operations.windows_storage_attached(storage))
+                with patch("operations.mount_points", return_value={str(storage), str(other)}):
+                    self.assertTrue(operations.windows_storage_attached(storage))
+                    self.assertFalse(operations.windows_storage_attached(other))
+                    self.assertFalse(operations.windows_storage_attached(Path(tmp)/"missing"))
 
 
 class ReadinessTests(unittest.TestCase):

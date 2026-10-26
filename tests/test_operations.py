@@ -174,7 +174,8 @@ class BackupTests(unittest.TestCase):
         state = {"checks":{"ssh":{"status":"ready"}, "cua":{"status":"ready"}}}
         with patch("operations.subprocess.Popen", return_value=self.provider()), patch("operations.collect", return_value=state) as check:
             self.assertIn("Windows is ready", operations.backup(self.config))
-        check.assert_called_once_with(self.config, deep=True)
+        # Pinned to Windows: the panel may have switched to another machine.
+        check.assert_called_once_with(self.config, deep=True, machine_id="windows")
         self.assertEqual(len(core.read_json(core.state_dir()/"backups.json")), 2)
 
 

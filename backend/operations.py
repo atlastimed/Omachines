@@ -178,7 +178,8 @@ def backup(config):
     record("backup","running","Backup verified; checking Windows recovery")
     deadline=time.monotonic()+150
     while time.monotonic()<deadline:
-        state=collect(config,deep=True)
+        # Pinned: the panel may switch to another machine during the backup.
+        state=collect(config,deep=True,machine_id="windows")
         if state.get("checks",{}).get("ssh",{}).get("status")=="ready":
             cua=state["checks"].get("cua",{}).get("status")
             return "Backup verified. Windows is ready." if cua=="ready" else "Backup verified. Windows commands work; check desktop tools."
@@ -188,6 +189,33 @@ def backup(config):
 
 def windows_anchor():
     return Path("/var/lib/omarchy/windows/mounts/users")/str(os.getuid())/"storage"
+
+
+def windows_storage():
+    from machines import windows_machine
+    return Path(windows_machine()["storagePath"])
+
+
+def mount_points():
+    # Field 5 of mountinfo is the mount point, with octal escapes for spaces.
+    # os.path.ismount compares devices, so it misses bind mounts within one
+    # filesystem; the kernel's mount table does not.
+    try:
+        with open("/proc/self/mountinfo") as f:
+            return {re.sub(r"\\([0-7]{3})",lambda m:chr(int(m.group(1),8)),fields[4])
+                    for fields in (line.split() for line in f) if len(fields)>4}
+    except OSError:
+        return set()
+
+
+def windows_storage_attached(anchor):
+    # Mounted, and the mount is this user's Windows storage.
+    if str(anchor) not in mount_points():
+        return False
+    try:
+        return os.path.samefile(windows_storage(),anchor)
+    except OSError:
+        return False
 
 
 def wait_windows_ready(timeout=300):
@@ -212,7 +240,9 @@ def attach_windows_storage():
     # existing lifecycle command. `__priv down` stops the container and keeps
     # the bind, so the helper then backs up a cleanly shut down Windows.
     anchor=windows_anchor()
-    if not anchor.parent.is_dir() or os.path.ismount(anchor) or windows_reachability({})[0] in ("running","starting"):
+    # Anything already mounted there takes the normal path; the helper checks
+    # its identity and refuses a wrong one.
+    if not anchor.parent.is_dir() or str(anchor) in mount_points() or windows_reachability({})[0] in ("running","starting"):
         return False
     print("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
     print("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
@@ -222,7 +252,7 @@ def attach_windows_storage():
     vm_priv("up")
     error=None
     try:
-        if not os.path.ismount(anchor):
+        if not windows_storage_attached(anchor):
             raise OperationError("Windows storage is still not attached; nothing was backed up")
         record("backup","running","Waiting for Windows to finish starting")
         if not wait_windows_ready():

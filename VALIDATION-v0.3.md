@@ -8,7 +8,7 @@ is needed.
 ## Automated checks
 
 On Omarchy 4.0.6 with Quickshell 0.3.2, `python3 scripts/check.py` passed:
-132 Python tests (129 at first, plus 3 added for the review fix below), `omarchy plugin validate`, zero-warning qmllint, and 25 native
+135 Python tests (129 at first, plus 6 added for the review fixes below), `omarchy plugin validate`, zero-warning qmllint, and 25 native
 Qt interaction cases (26 passes including initialization) in the isolated
 offscreen Quickshell runtime. The Python suite also passed with an empty `HOME`
 (no wrappers and no `omarchy-vm`), approximating generic CI. The repository
@@ -66,6 +66,22 @@ machine's state. Before, the whole snapshot failed, and the panel fell back to o
 without the machine list or the switcher. Any other failed collection is now
 attributed to the selected machine, so the daemon no longer discards it as stale
 and retries without pause. Covered by three new tests, which fail without the fix.
+
+Second review (two P2 findings, both confirmed):
+
+- **Storage anchor detection.** `os.path.ismount` compares devices, so it misses a
+  bind mount within one filesystem. In a user-namespace test, a same-filesystem
+  bind read `False` from `ismount` but was listed in `/proc/self/mountinfo`. Such
+  an attached anchor would have shut Windows down and refused the backup.
+  Detection now reads the kernel mount table. After `__priv up` it also requires
+  the anchor to be the same directory as `~/.windows`. Here the storage is on the
+  SSD, a different filesystem, so the old check happened to work; the new check
+  finds the live anchor and confirms its identity.
+- **Legacy backup recovery.** The recovery check after a provider-script backup
+  followed the selected machine, so switching to a ready Omarchy VM could report
+  "Windows is ready". It is now pinned to Windows.
+
+Three new tests plus a tightened recovery assertion; all fail without the fixes.
 
 ## Read-only probes of the running Omarchy VM
 
