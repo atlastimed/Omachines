@@ -28,11 +28,15 @@ belongs to.
 - **Backups:** name a backup, see size and verification time, recheck integrity,
   test an offline restored copy (Windows), or deliberately restore the machine.
 - **Settings:** CPU/RAM allocation, Aside integration, notifications, check interval
-  and recent panel operation history.
+  and recent panel operation history. The allocation fields stay within what the
+  machine accepts; a current allocation outside that range is noted and shown at the
+  nearest allowed values, and the confirmation names the current allocation.
 
 Arrows navigate; Enter activates; 1–4 select a section; M switches machine;
 R checks connections; Escape closes. Tab enters the backup or resource form, where
-normal editing keys apply. Disruptive actions have a confirmation with **Cancel** initially focused.
+normal editing keys apply; while that form cannot be edited (no backups yet, or an
+operation running) Tab does nothing and the panel keys stay active. Hovering a
+setting moves the keyboard cursor to it. Disruptive actions have a confirmation with **Cancel** initially focused.
 Actual restore also requires typing the selected backup identity in its terminal.
 
 ## Install and update
@@ -52,8 +56,10 @@ sudo /usr/bin/python3 -I scripts/install-admin.py
 ```
 
 Both commands are repeated when updating code that changes the administrator
-helper (v0.3 updates it to 0.3.0: rollback now detects every mount of the Windows
-storage). The Omarchy VM provider needs no helper. Read the source before installing privileged code. The helper is copied
+helper. Version 0.3.1 updates it to 0.3.1: a Windows restore asks for its typed
+confirmation before extracting the backup, so a cancelled restore leaves no copy
+behind. (0.3.0 made rollback detect every mount of the Windows storage.) The
+Omarchy VM provider needs no helper. Read the source before installing privileged code. The helper is copied
 root-owned into `/usr/local/lib/omachines/`; old helper versions are retained there.
 Each administrative operation still asks for authorization in a visible terminal.
 The prompt asks for the **Omarchy password**.
@@ -63,10 +69,17 @@ The user installer copies an explicit file list into
 stale component caches. It preserves settings, unrelated widgets and previous
 releases under `~/.local/state/omachines/install-backups/`, and hot-reloads without
 restarting the shell or Windows. An operation/maintenance gate prevents overlap
-with plugin workers. Malformed or symlinked shell settings are rejected.
+with plugin workers, including VM commands that outlive their worker. Malformed or
+symlinked shell settings are rejected.
+
+Removal first saves the panel's own options and its bar position to
+`~/.local/state/omachines/installer.json`; the next install restores them one field
+at a time through the shell, without rewriting other widgets or settings. An update
+leaves a VM entry you removed from the bar off it. If installation stops before the
+VM entry appears on the bar, run `python3 install.py` again to finish.
 
 ```bash
-# Remove the panel; preserve VM, backups, settings and helper:
+# Remove the panel; preserve VM, backups, settings and helper (options return on reinstall):
 python3 install.py --uninstall
 # Optional compatibility with a previously reviewed v0.1 backup workspace:
 python3 install.py --setup-workspace /absolute/path/to/WindowsVM
@@ -100,8 +113,9 @@ stops that copy; its files remain for inspection. A checksum and a reviewed boot
 are separate pieces of evidence. This is not a full application-level restore test.
 
 **Restore Windows** verifies the selected archive afresh and checks space for a
-copy alongside the existing storage. After typed confirmation it restores disk,
-TPM and firmware together. It retains the previous storage and journals the swap
+copy alongside the existing storage. Only after typed confirmation does it extract
+that copy, check it, stop Windows and switch disk, TPM and firmware together;
+cancelling leaves nothing behind. It retains the previous storage and journals the swap
 for recovery. The panel can return to that retained storage after another explicit
 confirmation. Current host connections and CPU/RAM allocation stay in place;
 private compose files in the backup are retained for manual recovery, not applied
@@ -112,6 +126,13 @@ remain private. Restores need enough free space to retain both copies. This rele
 never automatically prunes backups or deletes VM data. Do not manually manipulate
 Docker containers or storage during an operation. Inspect any interrupted operation
 before retrying; a stopped VM may need starting again.
+
+Each VM command runs under a small supervisor that holds the operation lock until
+the command itself ends. Closing the operation terminal, or stopping Omachines
+mid-operation, cannot let another operation or an update start while the command
+still runs: a stopped worker first waits for the command and records its result.
+If the worker is killed outright, the panel shows the operation as still running
+until the command ends, then as interrupted.
 
 CPU/RAM changes check host capacity and available memory before shutdown, preserve
 unrelated compose settings, and restart Windows only if it was running. The original

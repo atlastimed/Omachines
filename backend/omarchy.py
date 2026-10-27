@@ -10,8 +10,8 @@ import re
 import shutil
 import subprocess
 
-from core import (OperationError, check, cua_check, fresh_checks, hypr_windows, machine_operation, now,
-                  operation, read_json, run, state_dir, write_json)
+from core import (OperationError, carried_checks, check, cua_check, fresh_checks, hypr_windows, machine_operation,
+                  now, operation, read_json, run, state_dir, write_json)
 
 BACKUP_ID = re.compile(r"omarchy-\d{8}T\d{6}Z")
 ID = "omarchy"
@@ -199,7 +199,7 @@ def collect(config, machine, deep=False, previous=None):
     if not deep:
         if previous:
             s["error"] = previous.get("error", "")
-            s["checks"], s["resources"] = dict(previous.get("checks", {})), previous.get("resources", {})
+            s["checks"], s["resources"] = carried_checks(previous), previous.get("resources", {})
             if s["error"]:
                 s["summary"] = "Omarchy VM is reachable; connection checks failed"
             elif previous.get("state") == "running" and fresh_checks(previous, config["pollSeconds"]):
@@ -243,25 +243,24 @@ def sanitize(lines, fallback):
 
 
 def stream(action, argv, fallback, echo=False, progress=None):
-    from operations import record
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                         text=True, errors="replace", bufsize=1)
+    from operations import provider, record, say
     lines, stages = [], []
-    for raw in p.stdout:
-        if echo:
-            print(raw[:1000], end="" if raw.endswith("\n") else "\n", flush=True)
-        line = raw.strip()[:300]
-        if line.startswith("OMACHINES_STAGE:"):
-            stage = line.partition(":")[2]
-            if stage in STAGES:
-                stages.append(stage)
-                record(action, "running", STAGES[stage])
-        elif line:
-            for prefix, message in (progress or {}).items():
-                if line.startswith(prefix):
-                    record(action, "running", message)
-            lines = (lines + [line])[-4:]
-    p.wait()
+    with provider(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                  text=True, errors="replace", bufsize=1) as p:
+        for raw in p.stdout:
+            if echo:
+                say(raw[:1000], end="" if raw.endswith("\n") else "\n")
+            line = raw.strip()[:300]
+            if line.startswith("OMACHINES_STAGE:"):
+                stage = line.partition(":")[2]
+                if stage in STAGES:
+                    stages.append(stage)
+                    record(action, "running", STAGES[stage])
+            elif line:
+                for prefix, message in (progress or {}).items():
+                    if line.startswith(prefix):
+                        record(action, "running", message)
+                lines = (lines + [line])[-4:]
     if p.returncode:
         raise OperationError(sanitize(lines, fallback))
     return lines, stages
@@ -286,7 +285,7 @@ def guide(machine):
 
 
 def perform(action, config, parameters, machine):
-    from operations import record
+    from operations import record, say
     ctl = control(machine)
     if action == "open":
         windows = hypr_windows(lambda c: c.get("class") == "remote-viewer" and str(c.get("title", "")).startswith("Omarchy VM"))
@@ -346,13 +345,17 @@ def perform(action, config, parameters, machine):
         if row is None:
             raise OperationError("Select a known backup")
         record(action, "running", "Waiting for typed confirmation")
-        print("\nOmachines: restore Omarchy VM\n")
-        print("Backup: " + row["label"] + " · " + (row["createdAt"] or "unknown date") +
-              (" · integrity verified" if row["verified"] else " · not verified"))
-        print("Omarchy VM stops and its disk and firmware variables are replaced. The current disk is kept")
-        print("aside next to the VM storage. Shared-folder files and host settings are not changed.\n")
-        print("Type RESTORE " + name + " to continue:", flush=True)
-        if input().strip() != "RESTORE " + name:
+        say("\nOmachines: restore Omarchy VM\n")
+        say("Backup: " + row["label"] + " · " + (row["createdAt"] or "unknown date") +
+            (" · integrity verified" if row["verified"] else " · not verified"))
+        say("Omarchy VM stops and its disk and firmware variables are replaced. The current disk is kept")
+        say("aside next to the VM storage. Shared-folder files and host settings are not changed.\n")
+        say("Type RESTORE " + name + " to continue:")
+        try:
+            typed = input().strip()
+        except (EOFError, OSError):
+            typed = ""
+        if typed != "RESTORE " + name:
             raise OperationError("Restore cancelled; Omarchy VM is unchanged")
         record(action, "running", "Verifying the backup before replacement")
         stream(action, [ctl, "restore", name, "--replace-current"], "Restore did not finish; check this terminal before retrying",

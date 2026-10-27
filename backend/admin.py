@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 import time
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 COMPOSE=Path("/var/lib/omarchy/windows/docker-compose.yml")
 HELPER=Path("/usr/local/lib/omachines/admin.py")
 LOCK=Path("/run/lock/omarchy-windows-vm")
@@ -45,6 +45,11 @@ def command(argv, timeout=60, pass_fds=()):
     if p.returncode:
         raise Refused("A system command failed; original data and incomplete work were retained")
     return p.stdout
+
+
+def typed():
+    try:return input().strip()
+    except EOFError:return ''
 
 
 def mounted(path):
@@ -333,16 +338,21 @@ class Provider:
                 raise Refused('New allocation could not start; previous configuration restored and Windows restarted') from None
         return "Allocation updated"+("; Windows started" if was_running else "; applies when Windows starts")
 
-    def extract(self,path,parent):
-        # path is a pinned, verified archive FD. Sparse extents determine the
-        # required allocation; regular archives require their full logical size.
-        info=archive_info(path)
+    def room(self,info,parent):
+        # Sparse extents determine the required allocation; regular archives
+        # require their full logical size.
         if shutil.disk_usage(parent).free<info['requiredBytes']+5*GIB:raise Refused("Not enough space for a safe restore alongside the existing data")
+
+    def extract(self,path,info,parent):
+        # path is a pinned, verified archive FD.
+        self.room(info,parent)
         stage=Path(tempfile.mkdtemp(prefix='.omachines-restore-',dir=parent));stage.chmod(0o700)
         self.stage('restoring')
         command(['/usr/bin/tar','--extract','--sparse','--no-same-owner','--no-same-permissions','--file',str(path),'--directory',str(stage)],3600,pass_fds=(int(path.name),))
         command(['/usr/bin/sync','-f',str(stage)])
-        return stage/'storage'
+        clone=stage/'storage'
+        if clone.is_symlink() or not clone.is_dir():raise Refused('The extracted backup has no Windows storage; nothing was switched')
+        return clone
 
     def rehearsal(self,name):
         path,info,fd=self.verify(name)
@@ -351,7 +361,7 @@ class Provider:
         available=memory_info()['MemAvailable']
         if available<6*GIB:raise Refused('Free at least 6 GiB of host RAM before the rehearsal')
         if self.state.get('rehearsal',{}).get('status') in ('starting','awaiting-review'):raise Refused('Finish the previous rehearsal before starting another')
-        clone=self.extract(Path('/proc/self/fd')/str(fd),base)
+        clone=self.extract(Path('/proc/self/fd')/str(fd),info,base)
         container='omachines-rehearsal-'+str(self.uid)
         # No host shares, published ports, privileged mode, tun device or network.
         # The disk/TPM/firmware are disposable copies. The original VM is untouched.
@@ -394,11 +404,13 @@ class Provider:
         path,info,fd=self.verify(name)
         trusted(self.storage.parent)
         if self.storage.name!='storage':raise Refused('This recovery provider requires a storage directory below a root-owned parent')
-        clone=self.extract(Path('/proc/self/fd')/str(fd),self.storage.parent)
-        old=self.storage.with_name('storage-before-'+token())
+        # Confirm before extracting: a cancelled restore leaves no copy behind.
+        self.room(info,self.storage.parent)
         print('Type RESTORE '+name+' to replace the Windows disk, TPM and firmware (old data is retained):',flush=True)
-        if input().strip()!='RESTORE '+name:
+        if typed()!='RESTORE '+name:
             raise Refused('Restore cancelled; original Windows data is unchanged')
+        clone=self.extract(Path('/proc/self/fd')/str(fd),info,self.storage.parent)
+        old=self.storage.with_name('storage-before-'+token())
         with lifecycle_lock():
             self.down()
             self.state['recovery']={'status':'prepared','original':str(self.storage),'previous':str(old),'staged':str(clone),'backupId':name};self.save()
@@ -423,7 +435,7 @@ class Provider:
         if r.get('status') not in ('prepared','restored','needs-attention','rollback-switching') or old.parent!=self.storage.parent or not re.fullmatch(r'storage-before-\d{8}T\d{6}Z-[0-9a-f]{6}',old.name) or old.is_symlink() or (not old.is_dir() and not (retry and self.storage.is_dir())):
             raise Refused('No retained storage is eligible for rollback')
         print('Type ROLLBACK WINDOWS to stop Windows and return to its retained storage:',flush=True)
-        if input().strip()!='ROLLBACK WINDOWS':raise Refused('Rollback cancelled')
+        if typed()!='ROLLBACK WINDOWS':raise Refused('Rollback cancelled')
         with lifecycle_lock():
             self.down()
             # Remove every layer; a bind left in place would sit hidden under

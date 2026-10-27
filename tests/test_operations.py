@@ -4,6 +4,8 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -11,7 +13,8 @@ import time
 import unittest
 from unittest.mock import ANY, Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"backend"))
+BACKEND = Path(__file__).resolve().parents[1]/"backend"
+sys.path.insert(0, str(BACKEND))
 import core
 import operations
 
@@ -121,6 +124,104 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(core.operation()["status"], "interrupted")
         self.assertFalse(core.busy())
 
+    def test_worker_signals_are_restored_after_the_operation(self):
+        before = signal.getsignal(signal.SIGTERM)
+        operations.worker("stop", self.reserve())
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+
+# A fake omarchy-vm: it lists one backup, otherwise waits for a release file
+# and then writes output, as a real provider does after a worker may be gone.
+FAKE_VM = """#!/usr/bin/python3
+import json,os,sys,time
+from pathlib import Path
+marks=Path(%r)
+if sys.argv[1:2]==['backups']:
+    print(json.dumps([{'id':'omarchy-20261026T205001Z','verified':True,'createdAt':'2026-10-26T20:50:01Z'}]))
+    raise SystemExit
+(marks/'started').write_text(str(os.getpid()))
+while not (marks/'release').exists():time.sleep(0.02)
+for _ in range(3):print('Backup omarchy-20261027T000000Z saved and verified',flush=True)
+(marks/'done').write_text(' '.join(sys.argv[1:]))
+"""
+
+
+class ProviderLifetimeTests(unittest.TestCase):
+    # Real worker processes: the operation lock must last exactly as long as
+    # the provider, whatever happens to the worker that started it.
+    ACTIONS = {"backup": ({}, b""), "allocate": ({"cpu":1,"ram":4}, b""),
+               "restore": ({"backupId":"omarchy-20261026T205001Z"}, b"RESTORE omarchy-20261026T205001Z\n")}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        home, self.marks, state = root/"home", root/"marks", root/"state"
+        (home/".local/bin").mkdir(parents=True); self.marks.mkdir()
+        (home/".config/omarchy").mkdir(parents=True)
+        (home/".config/omarchy/shell.json").write_text(json.dumps({"bar":{"layout":{"right":[{"id":core.ID,"notify":False}]}}}))
+        control = home/".local/bin/omarchy-vm"
+        control.write_text(FAKE_VM % str(self.marks)); control.chmod(0o700)
+        p = patch.dict(os.environ, {"XDG_STATE_HOME":str(state)}); p.start(); self.addCleanup(p.stop)
+        self.env = {**os.environ, "HOME":str(home), "XDG_STATE_HOME":str(state)}
+        self.addCleanup(self.release)
+
+    def release(self):
+        (self.marks/"release").touch()
+
+    def start(self, action):
+        for mark in self.marks.iterdir(): mark.unlink()
+        parameters, typed = self.ACTIONS[action]
+        started = time.time()
+        core.write_json(core.state_dir()/"operation.json", {"action":action,"status":"starting","machineId":"omarchy",
+                        "requestId":"fixture","startedEpoch":started,"expiresEpoch":started+120,"parameters":parameters})
+        argv = [sys.executable,"-B",str(BACKEND/"omachinesctl"),"worker",action,"--request-id","fixture"]
+        worker = subprocess.Popen(argv+(["--interactive"] if action=="restore" else []), env=self.env,
+                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: worker.poll() is None and (worker.kill(), worker.wait()))
+        worker.stdin.write(typed); worker.stdin.close()
+        self.wait_for(lambda: (self.marks/"started").exists())
+        return worker
+
+    def wait_for(self, condition, timeout=5):
+        deadline = time.monotonic()+timeout
+        while not condition():
+            if time.monotonic() > deadline: self.fail("timed out")
+            time.sleep(0.02)
+
+    def assert_excluded(self):
+        self.assertTrue(core.busy())
+        with self.assertRaises(core.OperationError), core.maintenance():
+            self.fail("admitted maintenance")
+
+    def test_terminated_worker_waits_and_records_the_outcome(self):
+        for action in self.ACTIONS:
+            with self.subTest(action):
+                worker = self.start(action)
+                worker.terminate(); time.sleep(0.3)
+                self.assertIsNone(worker.poll(), "worker abandoned its provider")
+                self.assert_excluded()
+                self.release()
+                self.assertEqual(worker.wait(timeout=5), 128+signal.SIGTERM)
+                self.assertTrue((self.marks/"done").exists())
+                self.assertEqual(core.operation()["status"], "complete")
+                self.assertFalse(core.busy())
+
+    def test_killed_worker_leaves_the_lock_with_its_provider(self):
+        for action in self.ACTIONS:
+            with self.subTest(action):
+                worker = self.start(action)
+                worker.kill(); worker.wait(timeout=5)
+                self.assert_excluded()
+                op = core.operation()
+                self.assertEqual(op["status"], "running")
+                self.assertIn("result will not be reported", op["message"])
+                self.release()
+                # Its later output must not break the provider.
+                self.wait_for(lambda: (self.marks/"done").exists())
+                self.wait_for(lambda: not core.busy())
+                self.assertEqual(core.operation()["status"], "interrupted")
+
 
 class BackupTests(unittest.TestCase):
     def setUp(self):
@@ -180,3 +281,22 @@ class BackupTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class SupervisorTests(unittest.TestCase):
+    def supervise(self, code, **kwargs):
+        return subprocess.run([sys.executable, "-I", "-B", str(BACKEND/"supervise.py"), sys.executable, "-c", code],
+                              timeout=10, **kwargs)
+
+    def test_provider_exit_status_is_reported(self):
+        self.assertEqual(self.supervise("raise SystemExit(3)", capture_output=True).returncode, 3)
+        self.assertEqual(self.supervise("import os,signal; os.kill(os.getpid(),signal.SIGTERM)").returncode, 128+signal.SIGTERM)
+
+    def test_terminal_output_is_left_to_the_provider(self):
+        import pty
+        master, terminal = pty.openpty()
+        try:
+            result = self.supervise("import os,sys; sys.exit(0 if os.isatty(1) else 1)", stdout=terminal)
+        finally:
+            os.close(master); os.close(terminal)
+        self.assertEqual(result.returncode, 0)

@@ -18,7 +18,10 @@ DOCS = ("README.md", "LICENSE", "INTEGRATION.md", "SECURITY.md",
         "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "VALIDATION-v0.3.md", "REVIEW-FIXES.md")
 FILES = ("manifest.json", "BarWidget.qml", "MachineView.qml", "StatusRow.qml",
          "Service.qml", "Model.js", "BackupControls.qml", "ResourceControls.qml", *DOCS)
-BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1")
+BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1", "supervise.py")
+STATE = "installer.json"
+SECTIONS = ("left", "center", "right")
+DEFAULT_PLACEMENT = {"section": "right", "index": 1}
 
 
 def run(*args):
@@ -60,8 +63,87 @@ def read_config(path):
 def shell_mutation(method, *args):
     # These IPC methods mutate the shell's current settings in its event loop.
     # No saved entry or whole-file snapshot is written over concurrent edits.
-    if run("omarchy-shell", "shell", method, *args) != "ok":
-        raise RuntimeError("Plugin files are updated, but shell settings need attention")
+    result = run("omarchy-shell", "shell", method, *args)
+    if result != "ok":
+        raise RuntimeError(f"The shell rejected {method}: {result[:200]}")
+
+
+def plugin_options(values):
+    # Only this plugin's manifest options with plausible types. Saved options
+    # are user-writable state, restored one field at a time by the shell.
+    schema = json.loads((ROOT/"manifest.json").read_text())["barWidget"]["schema"]
+    valid = {"boolean": lambda v, s: isinstance(v, bool),
+             "integer": lambda v, s: type(v) is int and s.get("min", v) <= v <= s.get("max", v),
+             "string": lambda v, s: isinstance(v, str) and len(v) <= 4096 and not set(v) & {"\0", "\n"}}
+    values = values if isinstance(values, dict) else {}
+    return {s["key"]: values[s["key"]] for s in schema
+            if s["key"] in values and valid.get(s["type"], lambda *_: False)(values[s["key"]], s)}
+
+
+def bar_placement(value):
+    # Native placement: after the saved neighbour if it is still in that
+    # section, otherwise the saved index (the shell clamps it).
+    if (not isinstance(value, dict) or value.get("section") not in SECTIONS
+            or type(value.get("index")) is not int or not 0 <= value["index"] <= 1000):
+        return None
+    result = {"section": value["section"], "index": value["index"]}
+    if isinstance(value.get("after"), str) and 0 < len(value["after"]) <= 256:
+        result["after"] = value["after"]
+    return result
+
+
+def bar_entry(text):
+    # The plugin's current bar entry (raw) and its placement, or (None, None).
+    layout = json.loads(text).get("bar", {}).get("layout", {})
+    for section in SECTIONS:
+        row = layout.get(section, [])
+        ids = [e.get("id") if isinstance(e, dict) else e for e in row]
+        if ID in ids:
+            index = ids.index(ID)
+            after = ids[index-1] if index else None
+            entry = row[index] if isinstance(row[index], dict) else {"id": ID}
+            return entry, bar_placement({"section": section, "index": index, "after": after})
+    return None, None
+
+
+def load_state():
+    # Installer-owned private state: a pending first activation, and options
+    # and placement saved by uninstall until a later activation restores them.
+    from core import read_json, state_dir
+    data = read_json(state_dir()/STATE, {})
+    data = data if isinstance(data, dict) else {}
+    return {"activationPending": data.get("activationPending") is True,
+            "options": plugin_options(data.get("options")), "placement": bar_placement(data.get("placement"))}
+
+
+def save_state(state):
+    from core import state_dir, write_json
+    state = {key: value for key, value in state.items() if value}
+    if state:
+        write_json(state_dir()/STATE, state)
+    else:
+        (state_dir()/STATE).unlink(missing_ok=True)
+
+
+def in_bar():
+    return any(p.get("id") == ID and p.get("enabled") is True
+               for p in json.loads(run("omarchy", "plugin", "list", "--json")))
+
+
+def activate(shell, state):
+    # putBarWidget leaves an entry that is already on the bar where it is, so
+    # a retry after a lost acknowledgement cannot add a second entry.
+    read_config(shell)
+    shell_mutation("putBarWidget", ID, json.dumps(state["placement"] or DEFAULT_PLACEMENT))
+    if not in_bar():
+        raise RuntimeError("The shell did not add the bar entry")
+    # Saved options fill only fields the entry lacks; values changed since the
+    # entry was added are never overwritten by an older saved copy.
+    entry, _ = bar_entry(read_config(shell))
+    for key, value in state["options"].items():
+        if key not in (entry or {}):
+            shell_mutation("setBarWidget", ID, key, json.dumps(value), "{}")
+    save_state({})
 
 
 def rescan(present):
@@ -119,6 +201,14 @@ def install(args):
     backup = private_dir(state_dir()/"install-backups"/dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
     atomic(backup/"shell.json", old_config)
     had_plugin = destination.exists()
+    # A fresh install, or one whose first activation never finished, adds the
+    # bar entry. An ordinary update leaves a deliberately removed entry off.
+    # The intent is saved before publishing so a retry can complete it.
+    state = load_state()
+    pending = not args.uninstall and (not had_plugin or state["activationPending"])
+    if pending and not state["activationPending"]:
+        state["activationPending"] = True
+        save_state(state)
     staged = None
     published = False
     try:
@@ -148,16 +238,30 @@ def install(args):
             shutil.rmtree(staged)
     # File transaction is complete. Native settings mutations are separate,
     # current-state operations. If an IPC acknowledgement fails, retain the
-    # installed files and current settings rather than guessing a rollback.
-    if args.uninstall or not had_plugin or args.setup_workspace:
-        read_config(shell)
-    if args.uninstall:
-        shell_mutation("setPluginEnabled", ID, "false")
-    elif not had_plugin:
-        shell_mutation("putBarWidget", ID, json.dumps({"section":"right", "index":1}))
-    if not args.uninstall and args.setup_workspace:
-        shell_mutation("setBarWidget", ID, "setupWorkspace", json.dumps(str(args.setup_workspace)), "{}")
-    print("Omachines removed; VM, backups and private state preserved." if args.uninstall else "Omachines installed. Click VM on the right of the bar.")
+    # installed files and current settings rather than guessing a rollback;
+    # rerunning the same command resumes from the saved installer state.
+    try:
+        if args.uninstall:
+            entry, placement = bar_entry(read_config(shell))
+            # Disabling deletes the entry with its options, so save them first.
+            # A repeated removal (entry already gone) keeps the earlier copy.
+            if entry is not None:
+                state["options"] = {**state["options"], **plugin_options(entry)}
+                state["placement"] = placement
+            state["activationPending"] = False
+            save_state(state)
+            shell_mutation("setPluginEnabled", ID, "false")
+        elif pending:
+            activate(shell, state)
+        if not args.uninstall and args.setup_workspace:
+            read_config(shell)
+            shell_mutation("setBarWidget", ID, "setupWorkspace", json.dumps(str(args.setup_workspace)), "{}")
+    except Exception as error:
+        raise RuntimeError(f"Omachines files are {'removed' if args.uninstall else 'installed'}, but its bar "
+                           f"settings did not finish updating ({error}). Run the same install.py command again to finish.") from error
+    print("Omachines removed; VM, backups, private state and plugin options preserved." if args.uninstall
+          else "Omachines installed. Click VM in the bar." if pending
+          else "Omachines updated; its bar entry was left as it was.")
     print("Previous configuration: " + str(backup))
 
 

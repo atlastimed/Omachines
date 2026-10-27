@@ -46,16 +46,21 @@ function resourceLine(state) {
   var r = state.resources || {}
   return r.cpu ? r.cpu + " CPUs · " + gib(r.memoryBytes) + " RAM" : isOmarchy(state) ? "Omarchy Linux VM" : "Omarchy Windows VM"
 }
+// The configured allocation, so a confirmation shows the change it makes.
+function allocationNow(state) {
+  var a = state.allocation || {}, ram = String(a.ram || "").match(/^(\d+)G$/i)
+  return a.cpu && ram ? "Currently " + a.cpu + " CPUs and " + ram[1] + " GiB RAM. " : ""
+}
 function confirmationText(action, p, state) {
   var n = name(state)
   if (isOmarchy(state)) return ({
     stop: "Shut down " + n + "? Save your work first. Guest apps and agent tasks will stop.",
     backup: "Back up " + n + "? It shuts down while its disk is copied and verified, then starts again if it was running. Save your work first. No password is needed.",
-    allocate: "Apply " + p.cpu + " CPUs and " + p.ram + " GiB RAM to " + n + "? It restarts if it is running; save your work first.",
+    allocate: "Apply " + p.cpu + " CPUs and " + p.ram + " GiB RAM to " + n + "? " + allocationNow(state) + "It restarts if it is running; save your work first.",
     restore: "Restore backup " + p.backupId + "? " + n + " stops and its disk is replaced with this backup; the current disk is kept aside. A terminal asks you to type the backup identity first."
   })[action] || "Continue?"
   return ({
-    allocate: "Apply " + p.cpu + " CPUs and " + p.ram + " GiB RAM? Running Windows apps will close. Windows restarts if it was running. A terminal asks for your Omarchy password.",
+    allocate: "Apply " + p.cpu + " CPUs and " + p.ram + " GiB RAM? " + allocationNow(state) + "Running Windows apps will close. Windows restarts if it was running. A terminal asks for your Omarchy password.",
     rehearse: "Test backup " + p.backupId + " in a separate offline VM using 4 GiB RAM? The original Windows VM is preserved. Review the captured boot screen before recording success. Temporary files remain for inspection.",
     rollback: "Return Windows to the storage retained before restoration? Windows will stop. The terminal asks you to confirm; the replaced storage is also retained.",
     restore: "Restore backup " + p.backupId + "? Windows will stop. The disk, TPM and firmware are replaced with this backup; current storage is retained for recovery. The terminal verifies space and integrity and asks you to type the backup identity before replacement.",

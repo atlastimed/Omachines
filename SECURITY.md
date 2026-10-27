@@ -22,6 +22,14 @@ Trust boundaries:
   SIGTERM and SIGHUP. Detached lifecycle workers have a separate lifetime.
   This is not containment for a malicious host executable that escapes its
   process group, nor a cleanup guarantee after an uncatchable owner SIGKILL.
+- A lifecycle worker never abandons its VM command. Each command runs under a
+  supervisor that inherits the operation lock and lives as long as the command,
+  so even a killed worker cannot admit a second operation or an update early.
+  A worker asked to stop waits for the command and records its result.
+- Installer state in `~/.local/state/omachines/installer.json` holds the panel's
+  saved options, including the legacy backup workspace path, between removal and
+  reinstall. Like `shell.json`, it must be controlled by the user. Only this
+  plugin's known option keys with valid types are restored.
 - Reports and operation records are private local files. Reports omit account
   IDs, guest paths, window titles and raw command output. Review any report
   before attaching it to a public issue.
@@ -96,3 +104,6 @@ up/down` interface in the visible operation terminal and the helper's existing c
 Helper 0.3.0 changes only how rollback finds the storage mount: it reads the kernel
 mount table, because `os.path.ismount` misses a bind mount within one filesystem.
 It removes every mount layer before switching storage and refuses if one remains.
+Helper 0.3.1 changes only the order of a restore: it checks space and asks for the
+typed confirmation before extracting, confirms the extracted copy contains Windows
+storage, and treats end of input as cancellation.

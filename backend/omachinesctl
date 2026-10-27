@@ -31,6 +31,11 @@ def stale(result, config):
         return False
 
 
+def regained(old, new):
+    return (new.get("state")=="running" and old.get("state") not in ("running","unknown","checking")
+            and old.get("machineId")==new.get("machineId"))
+
+
 def select(machine_id, snapshot):
     if not isinstance(machine_id,str):
         raise OperationError("Choose a machine")
@@ -53,6 +58,7 @@ def daemon():
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=1)
     snapshot={"state":"checking","summary":"Checking machines","checks":{},"resources":{},"backups":[],"operation":{},"capabilities":{},"machines":[]}
     pending=None
+    pending_deep=False
     due=0
     deep_due=0
     requested=False
@@ -67,11 +73,16 @@ def daemon():
                 if stale(result,config):
                     requested=True
                 else:
+                    # SSH has just become reachable: check the connections
+                    # now instead of at the next deep poll.
+                    if regained(snapshot,result) and not pending_deep:
+                        requested=True
                     snapshot=result
                     emit(snapshot)
             if not pending and (requested or clock>=due):
                 deep=(requested or clock>=deep_due) and snapshot.get("operation",{}).get("status") not in ("starting","running")
                 pending=pool.submit(refresh_snapshot,dict(config),dict(snapshot),deep)
+                pending_deep=deep
                 requested=False
                 due=clock+15
                 if deep:

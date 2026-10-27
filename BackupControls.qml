@@ -22,7 +22,7 @@ Column {
   readonly property string machineName: Model.name(machine)
   signal request(string action, var parameters)
   signal editingFinished()
-  function focusEntry() { nameField.forceActiveFocus() }
+  function focusEntry() { if (nameField.visible && nameField.enabled) nameField.forceActiveFocus(); return nameField.activeFocus }
   function resetDraft() { nameModified=false; nameField.text=selected.label || "" }
   function idFor(record) { return record.id || String(record.path || "").split("/").pop() }
   onRecordsChanged: if (!records.some(function(r) { return root.idFor(r) === root.backupId })) backupId = records.length ? idFor(records[0]) : ""

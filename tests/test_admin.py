@@ -67,7 +67,7 @@ class RestoreTests(unittest.TestCase):
         self.clone=self.root/'stage/storage';self.clone.mkdir(parents=True);(self.clone/'data.img').write_text('restored')
         self.p=admin.Provider.__new__(admin.Provider);self.p.storage=self.storage;self.p.anchor=self.root/'anchor';self.p.state={};self.p.save=Mock();self.p.down=Mock();self.p.up=Mock()
         self.p.uid=os.getuid();self.p.gid=os.getgid()
-        self.p.verify=Mock(return_value=(self.root,{},10));self.p.extract=Mock(return_value=self.clone)
+        self.p.verify=Mock(return_value=(self.root,{},10));self.p.room=Mock();self.p.extract=Mock(return_value=self.clone)
         self.name='development-ready-20261016T193430Z'
     def tearDown(self):self.tmp.cleanup()
     def run_restore(self,confirm=None,cmd=None):
@@ -82,6 +82,24 @@ class RestoreTests(unittest.TestCase):
     def test_cancellation_never_stops_original(self):
         with self.assertRaises(admin.Refused):self.run_restore('cancel')
         self.p.down.assert_not_called();self.assertEqual((self.storage/'data.img').read_text(),'original')
+        # Nothing was extracted, so no root-owned copy is left behind.
+        self.p.extract.assert_not_called()
+    def test_end_of_input_cancels_without_extracting(self):
+        with patch('admin.trusted'),patch('builtins.input',side_effect=EOFError):
+            with self.assertRaisesRegex(admin.Refused,'cancelled'):self.p.restore(self.name)
+        self.p.extract.assert_not_called();self.p.down.assert_not_called()
+    def test_space_is_checked_before_asking(self):
+        self.p.room=Mock(side_effect=admin.Refused('Not enough space'))
+        prompt=Mock()
+        with patch('admin.trusted'),patch('builtins.input',prompt):
+            with self.assertRaisesRegex(admin.Refused,'space'):self.p.restore(self.name)
+        prompt.assert_not_called();self.p.extract.assert_not_called()
+    def test_extraction_follows_confirmation_and_precedes_shutdown(self):
+        calls=Mock();calls.attach_mock(self.p.extract,'extract');calls.attach_mock(self.p.down,'down')
+        with patch('admin.trusted'),patch('admin.lifecycle_lock',return_value=nullcontext()),patch('admin.command'),\
+             patch('builtins.input',side_effect=lambda:(calls.confirm(),'RESTORE '+self.name)[1]):
+            self.p.restore(self.name)
+        self.assertEqual([c[0] for c in calls.mock_calls],['confirm','extract','down'])
     def test_failed_mount_retains_both_versions_and_does_not_start(self):
         def fail(argv,*a,**kw):
             if argv[0]=='/usr/bin/mount':raise admin.Refused('fixture failure')
@@ -192,7 +210,12 @@ class SparseArchiveTests(unittest.TestCase):
             info=admin.archive_info(archive)
             self.assertLess(info['requiredBytes'],1024**2);self.assertGreater(info['logicalBytes'],1024**3)
             p=admin.Provider.__new__(admin.Provider);p.stage=Mock()
-            with archive.open('rb') as f:clone=p.extract(Path('/proc/self/fd')/str(f.fileno()),root)
+            with archive.open('rb') as f:clone=p.extract(Path('/proc/self/fd')/str(f.fileno()),info,root)
             with (clone/'data.img').open('rb') as f:
                 self.assertEqual(f.read(5),b'begin');f.seek(1024**3);self.assertEqual(f.read(),b'end')
             self.assertEqual((clone/'windows_secure.tpm/state').read_text(),'TPM')
+    def test_extraction_without_storage_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            p=admin.Provider.__new__(admin.Provider);p.stage=Mock();p.room=Mock()
+            with patch('admin.command'),self.assertRaisesRegex(admin.Refused,'no Windows storage'):
+                p.extract(Path('/proc/self/fd/0'),{'requiredBytes':0},Path(temp))

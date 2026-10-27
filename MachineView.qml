@@ -14,17 +14,21 @@ Column {
   property var config: ({asideEnabled:true, notify:true, pollSeconds:120})
   property string section: "Overview"
   property int cursorIndex: 0
+  // The hovered interval choice, which Enter selects; -1 cycles the interval.
+  property int intervalChoice: -1
   property string confirmation: ""
   property var confirmationParameters: ({})
   readonly property var focusedItem: Window.window ? Window.window.activeFocusItem : null
   readonly property bool editing: backupControls.editing || resourceControls.editing || ownsFormFocus(focusedItem)
   function ownsFormFocus(item) { while (item) { if (item === backupControls || item === resourceControls) return true; item=item.parent } return false }
-  function focusEditor() { if (section === "Backups") backupControls.focusEntry(); else if (section === "Settings") resourceControls.focusEntry() }
+  // True when a usable form editor took focus; otherwise the panel keys keep it.
+  function focusEditor() { return section === "Backups" ? backupControls.focusEntry() : section === "Settings" && resourceControls.focusEntry() }
   property string serviceError: ""
   property real clock: Date.now()
   property color foreground: root.popupTokens.text
   property string fontFamily: root.fontTokens.family
   readonly property var sections: ["Overview", "Agents", "Backups", "Settings"]
+  readonly property var pollChoices: [60, 120, 300]
   readonly property var actions: Model.actionRows(section, machine, config.asideEnabled !== false)
   readonly property bool busy: Model.active(machine)
   readonly property var op: machine.operation || ({})
@@ -38,7 +42,12 @@ Column {
   signal settingsChanged(var values)
   signal revealItem(var item)
   signal confirmationClosed()
-  onFocusedItemChanged: if (focusedItem && ownsFormFocus(focusedItem)) root.revealItem(focusedItem)
+  // A focused form control that is hidden or disabled (an operation starting)
+  // leaves focus on the window root; return it to the panel keys.
+  onFocusedItemChanged: {
+    if (focusedItem && ownsFormFocus(focusedItem)) root.revealItem(focusedItem)
+    else if (focusedItem && focusedItem === Window.contentItem) Qt.callLater(function() { if (root.focusedItem === root.Window.contentItem) root.confirmationClosed() })
+  }
   spacing: Style.space(12)
   onSectionChanged: { cursorIndex = 0; confirmation = "" }
   onCursorIndexChanged: Qt.callLater(function() { if (actionList.itemAt(cursorIndex)) root.revealItem(actionList.itemAt(cursorIndex)) })
@@ -61,7 +70,7 @@ Column {
     if (confirmation !== "") return
     if (dx) section = sections[(sections.indexOf(section) + dx + sections.length) % sections.length]
     var count = section === "Settings" ? 3 : actions.length
-    if (dy && count) cursorIndex = (cursorIndex + dy + count) % count
+    if (dy && count) { cursorIndex = (cursorIndex + dy + count) % count; intervalChoice = -1 }
   }
   function activate() {
     // Confirmations deliberately require their explicit button; Enter cannot
@@ -70,7 +79,7 @@ Column {
     if (section === "Settings") {
       if (cursorIndex === 0) settingsChanged({asideEnabled: config.asideEnabled === false})
       else if (cursorIndex === 1) settingsChanged({notify: config.notify === false})
-      else { let choices=[60,120,300]; settingsChanged({pollSeconds:choices[(choices.indexOf(Number(config.pollSeconds || 120))+1)%3]}) }
+      else settingsChanged({pollSeconds:pollChoices[intervalChoice >= 0 ? intervalChoice : (pollChoices.indexOf(Number(config.pollSeconds || 120))+1)%3]})
       return
     }
     if (!actions.length) return
@@ -208,13 +217,16 @@ Column {
     visible: root.section === "Settings"
     width: parent.width
     spacing: Style.space(10)
-    Toggle { width: parent.width; hasCursor: root.cursorIndex === 0; label: "Aside integration"; description: "Windows browser controls and connection checks"; checked: root.config.asideEnabled !== false; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.settingsChanged({asideEnabled: !checked}) }
-    Toggle { width: parent.width; hasCursor: root.cursorIndex === 1; label: "Operation notifications"; description: "Backup and lifecycle results"; checked: root.config.notify !== false; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.settingsChanged({notify: !checked}) }
+    // Hover moves the keyboard cursor, as on the action rows and native panels.
+    Toggle { width: parent.width; hasCursor: root.cursorIndex === 0; label: "Aside integration"; description: "Windows browser controls and connection checks"; checked: root.config.asideEnabled !== false; foreground: root.foreground; fontFamily: root.fontFamily; onHovered: function(h) { if (h) root.cursorIndex = 0 }; onClicked: root.settingsChanged({asideEnabled: !checked}) }
+    Toggle { width: parent.width; hasCursor: root.cursorIndex === 1; label: "Operation notifications"; description: "Backup and lifecycle results"; checked: root.config.notify !== false; foreground: root.foreground; fontFamily: root.fontFamily; onHovered: function(h) { if (h) root.cursorIndex = 1 }; onClicked: root.settingsChanged({notify: !checked}) }
     Text { text: (root.cursorIndex === 2 ? "› " : "") + "Connection check interval"; textFormat: Text.PlainText; color: root.foreground; font.family: root.fontFamily; font.pixelSize: root.fontTokens.bodySmall }
     ButtonGroup {
-      options: [{value:60,label:"1 min"},{value:120,label:"2 min"},{value:300,label:"5 min"}]
+      options: root.pollChoices.map(function(s) { return {value:s, label:s/60 + " min"} })
       value: Number(root.config.pollSeconds || 120)
+      cursorIndex: root.cursorIndex === 2 ? root.intervalChoice : -1
       foreground: root.foreground; fontFamily: root.fontFamily
+      onHovered: function(index, h) { if (h) { root.cursorIndex = 2; root.intervalChoice = index } }
       onChanged: function(value) { root.settingsChanged({pollSeconds:Number(value)}) }
     }
     Text {

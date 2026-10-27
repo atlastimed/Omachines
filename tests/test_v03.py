@@ -327,6 +327,27 @@ class DaemonTests(Base):
         for value in ("unknown", None, 3):
             with self.assertRaises(core.OperationError): self.ctl.select(value, old)
 
+    def test_lost_windows_ssh_invalidates_readiness_until_checked_again(self):
+        ready = {k: core.check(s, "old") for k, s in (("ssh", "ready"), ("desktop", "available"), ("cua", "ready"), ("aside", "ready"))}
+        def poll(ports, previous):
+            with patch("core.tcp", side_effect=lambda p: p in ports), patch("core.viewer_windows", return_value=[]), \
+                 patch("core.backups", return_value=[]), patch("core.capabilities", return_value={"ssh": True, "cua": True, "aside": True}):
+                return {**core.collect_windows({"demo": False, "pollSeconds": 120}, previous=previous), "machineId": "windows"}
+        before = {"state": "running", "summary": "Windows is ready", "checks": ready, "machineId": "windows"}
+        lost = poll({8006}, before)
+        self.assertEqual(lost["state"], "starting")
+        self.assertEqual({k: v["status"] for k, v in lost["checks"].items()},
+                         {"ssh": "offline", "desktop": "unknown", "cua": "unknown", "aside": "unknown"})
+        back = poll({2222, 8006}, lost)
+        self.assertEqual(back["state"], "running")
+        self.assertIn("checks are due", back["summary"])
+        self.assertEqual({v["status"] for v in back["checks"].values()}, {"unknown"})
+        # The service checks the connections at once rather than at the next deep poll.
+        self.assertTrue(self.ctl.regained(lost, back))
+        self.assertFalse(self.ctl.regained(before, back))
+        self.assertFalse(self.ctl.regained({**lost, "state": "unknown"}, back))
+        self.assertFalse(self.ctl.regained({**lost, "machineId": "omarchy"}, back))
+
 
 class OperationTests(Base):
     def setUp(self):
@@ -384,7 +405,7 @@ class OperationTests(Base):
         self.assertEqual(perform.call_count, 1)
 
     def stream(self, lines, code=0):
-        return Mock(stdout=iter(lines), returncode=code, wait=Mock(return_value=code))
+        return Mock(stdout=io.StringIO("".join(lines)), returncode=code, wait=Mock(return_value=code))
 
     def test_backup_records_stages_and_confirms_result(self):
         machine = machines.omarchy_machine()

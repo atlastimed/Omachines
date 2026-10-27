@@ -41,6 +41,7 @@ Window {
       view.machine={state:"running",summary:"Windows is ready",name:"Windows 11",provider:"omarchy-windows",machineId:"windows",checks:{},resources:{cpu:4,memoryBytes:8589934592},capabilities:{viewer:true,ssh:true,cua:true,aside:true,omarchy:true,lifecycle:true,backup:true,shared:true,console:true,handoff:true,asideSupported:true,catalogue:true,rehearsal:true,rollback:true},backups:[],operation:{}}
       view.config={asideEnabled:true,notify:true,pollSeconds:120}
       view.section = "Overview"; view.reset(); keys.forceActiveFocus(); actionSpy.clear(); settingsSpy.clear(); closeSpy.clear(); selectSpy.clear()
+      mouseMove(keys,keys.width-1,1) // park the pointer beside the view so hover starts afresh
     }
     readonly property var both: [{id:"windows",name:"Windows 11",provider:"omarchy-windows",state:"running",active:true,summary:"Windows is ready"},{id:"omarchy",name:"Omarchy VM",provider:"omarchy-qemu",state:"stopped",active:false,summary:"Omarchy VM is stopped"}]
     function omarchyMachine(extra) {
@@ -187,6 +188,96 @@ Window {
       tryVerify(function(){return view.editing})
       field.contentItem.forceActiveFocus();field.contentItem.selectAll();keyClick(Qt.Key_6);keyClick(Qt.Key_Tab)
       compare(view.section,"Settings");compare(field.value,6);compare(actionSpy.count,0)
+    }
+    function findBy(item,key,value) {
+      if (item[key]===value) return item
+      for (var i=0;i<item.children.length;i++) { var found=findBy(item.children[i],key,value); if (found) return found }
+      return null
+    }
+    function verifyPanelKeys() {
+      // Arrows, 1-4, R and Escape still reach the panel keys.
+      verify(keys.activeFocus);verify(!view.editing)
+      keyClick(Qt.Key_1);compare(view.section,"Overview")
+      keyClick(Qt.Key_Down);compare(view.cursorIndex,1)
+      keyClick(Qt.Key_Right);compare(view.section,"Agents")
+      keyClick(Qt.Key_R);compare(actionSpy.count,1);compare(actionSpy.signalArguments[0][0],"refresh")
+      keyClick(Qt.Key_Escape);compare(closeSpy.count,1)
+    }
+    function test_tab_without_backups_keeps_panel_keys() {
+      view.machine=omarchyMachine({backups:[]});view.section="Backups"
+      var field=findChild(view,"backup-name");verify(!field.enabled)
+      keyClick(Qt.Key_Tab);verify(!view.focusEditor());verify(!field.focus)
+      // A backup found later does not pull focus into the form.
+      view.machine=omarchyMachine();verify(field.enabled);wait(30)
+      verifyPanelKeys()
+    }
+    function test_tab_into_busy_forms_keeps_panel_keys() {
+      view.machine=omarchyMachine({operation:{status:"running",action:"backup",machineId:"omarchy"}})
+      for (var section of ["Backups","Settings"]) { view.section=section;keyClick(Qt.Key_Tab);verify(keys.activeFocus);verify(!view.focusEditor()) }
+      verify(!findChild(view,"allocation-cpu").field.focus)
+      verifyPanelKeys()
+    }
+    function test_tab_focuses_enabled_forms() {
+      view.machine=omarchyMachine();view.section="Backups";keyClick(Qt.Key_Tab)
+      tryCompare(findChild(view,"backup-name"),"activeFocus",true);verify(view.editing)
+      keyClick(Qt.Key_Escape);tryCompare(keys,"activeFocus",true);compare(closeSpy.count,0)
+      keyClick(Qt.Key_4);compare(view.section,"Settings");keyClick(Qt.Key_Tab)
+      tryVerify(function(){return findChild(view,"allocation-cpu").field.activeFocus});verify(view.editing)
+    }
+    function test_operation_start_returns_form_focus_to_panel_keys() {
+      view.machine=omarchyMachine();view.section="Backups";keyClick(Qt.Key_Tab)
+      tryCompare(findChild(view,"backup-name"),"activeFocus",true)
+      keyClick(Qt.Key_Tab);keyClick(Qt.Key_Tab);verify(findChild(view,"verify-backup").activeFocus)
+      keyClick(Qt.Key_Return);compare(actionSpy.count,1);compare(actionSpy.signalArguments[0][0],"verify")
+      view.machine=omarchyMachine({operation:{status:"running",action:"verify",machineId:"omarchy"}})
+      tryCompare(keys,"activeFocus",true)
+      view.machine=omarchyMachine();wait(30)
+      actionSpy.clear();verifyPanelKeys()
+    }
+    function test_allocation_outside_limits_is_submitted_as_shown() {
+      var cpu=findChild(view,"allocation-cpu").field,ram=findChild(view,"allocation-ram").field
+      // Below the RAM minimum, then above both maximums.
+      var cases=[[{cpu:6,ram:"2G"},{cpu:16,ram:24},6,4],[{cpu:20,ram:"40G"},{cpu:8,ram:24},8,24]]
+      view.section="Settings"
+      for (var i=0;i<cases.length;i++) {
+        var c=cases[i];view.machine=omarchyMachine({allocation:c[0],limits:c[1]});view.reset()
+        compare(cpu.value,c[2]);compare(ram.value,c[3])
+        wait(30);mouseClick(findChild(view,"apply-allocation"))
+        compare(view.confirmationParameters.cpu,c[2]);compare(view.confirmationParameters.ram,c[3])
+        compare(findChild(view,"confirmation-text").text.indexOf("Apply "+c[2]+" CPUs and "+c[3]+" GiB RAM to Omarchy VM? Currently "+c[0].cpu+" CPUs and "+parseInt(c[0].ram)+" GiB RAM."),0)
+        tryVerify(function(){return findChild(view,"cancel-action").activeFocus})
+        findChild(view,"confirm-action").forceActiveFocus();keyClick(Qt.Key_Return)
+        compare(actionSpy.count,i+1);compare(actionSpy.signalArguments[i][2].cpu,c[2]);compare(actionSpy.signalArguments[i][2].ram,c[3])
+        verify(findChild(view,"allocation-note").visible)
+      }
+    }
+    function test_allocation_follows_limit_changes() {
+      view.machine=omarchyMachine({allocation:{cpu:6,ram:"8G"},limits:{cpu:16,ram:24}});view.section="Settings";view.reset()
+      var cpu=findChild(view,"allocation-cpu").field,ram=findChild(view,"allocation-ram").field
+      ram.contentItem.forceActiveFocus();ram.contentItem.selectAll();keyClick(Qt.Key_2);keyClick(Qt.Key_0);keyClick(Qt.Key_Tab)
+      compare(ram.value,20)
+      view.machine=omarchyMachine({allocation:{cpu:6,ram:"8G"},limits:{cpu:4,ram:12}})
+      compare(cpu.value,4);compare(ram.value,12)
+      wait(30);mouseClick(findChild(view,"apply-allocation"))
+      compare(view.confirmationParameters.cpu,4);compare(view.confirmationParameters.ram,12)
+      compare(findChild(view,"confirmation-text").text.indexOf("Apply 4 CPUs and 12 GiB RAM"),0)
+      tryVerify(function(){return findChild(view,"cancel-action").activeFocus});keyClick(Qt.Key_Return)
+      compare(actionSpy.count,0);verify(findChild(view,"allocation-note").visible)
+    }
+    function test_settings_hover_moves_keyboard_cursor() {
+      view.section="Settings";wait(30)
+      var aside=findBy(view,"label","Aside integration"),notify=findBy(view,"label","Operation notifications"),oneMinute=findBy(view,"text","1 min")
+      function sent(i) { return JSON.stringify(settingsSpy.signalArguments[i][0]) }
+      mouseMove(notify,notify.width/2,notify.height/2);compare(view.cursorIndex,1);verify(notify.hasCursor);verify(!aside.hasCursor)
+      keyClick(Qt.Key_Return);compare(sent(0),'{"notify":false}')
+      keyClick(Qt.Key_Up);verify(aside.hasCursor);keyClick(Qt.Key_Return);compare(sent(1),'{"asideEnabled":false}')
+      mouseMove(oneMinute,oneMinute.width/2,oneMinute.height/2);compare(view.cursorIndex,2);verify(oneMinute.hasCursor)
+      keyClick(Qt.Key_Return);compare(sent(2),'{"pollSeconds":60}')
+      // A keyboard move returns Enter to cycling the interval.
+      keyClick(Qt.Key_Up);keyClick(Qt.Key_Down);compare(view.cursorIndex,2);verify(!oneMinute.hasCursor)
+      keyClick(Qt.Key_Return);compare(sent(3),'{"pollSeconds":300}')
+      mouseMove(aside,aside.width/2,aside.height/2);compare(view.cursorIndex,0);verify(!notify.hasCursor)
+      keyClick(Qt.Key_Return);compare(sent(4),'{"asideEnabled":false}');compare(settingsSpy.count,5)
     }
     function test_restore_confirmation_pins_selected_backup() {
       var parameters={backupId:"omachines-20260101T000000Z-abcdef"}
