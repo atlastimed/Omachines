@@ -20,13 +20,21 @@ Windows launcher runs, and cancel at once otherwise; the lock is also released
 before a failure message waits for Enter. Real-worker tests cover SIGINT and SIGTERM
 at the confirmation and the released lock (both fail on `227d580`).
 
+A Copilot review of `4506b37` found two more. A real `MemAvailable` of 0 let Windows
+start, because the check treated it like an unreadable value; an unreadable value is
+now `None` (shown as "Not checked") and 0 refuses. And reinstalling read the bar entry
+once before restoring every saved option, so an option changed in Omarchy meanwhile
+could be overwritten; the entry is now read again before each field. Omarchy's shell
+has no set-if-absent call, so an edit landing between one read and its write is the
+remaining window. Both tests fail on `4506b37`.
+
 While adding those tests, one regression from the first system-review commit was
 found and fixed: `omarchy-vm start` had lost its wait for QEMU's monitor (it moved
 into the post-maintenance restart helper), so `start` returned before QEMU answered.
 
 ### Verification
 
-`python3 scripts/check.py` passes 194 Python tests, manifest validation, qmllint
+`python3 scripts/check.py` passes 196 Python tests, manifest validation, qmllint
 without warnings and 35 native Qt passes; the privacy check is clean. The Omarchy VM
 tooling's 12 tests pass (`python3 -m unittest discover -s tests` in its folder).
 

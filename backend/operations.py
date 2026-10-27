@@ -212,8 +212,12 @@ def ensure_memory():
     allocation=machines.admin_state().get("allocation")
     ram=re.fullmatch(r"([1-9][0-9]{0,3})G",str(allocation.get("ram","") if isinstance(allocation,dict) else ""))
     need=int(ram[1]) if ram else 8
-    free=machines.host_resources()["availableBytes"]
-    if free and free<need*1024**3:
+    try:
+        free=machines.host_resources()["availableBytes"]
+    except (OSError,ValueError,IndexError):
+        free=None
+    # An unreadable value is not a reason to refuse; a reading of 0 is.
+    if free is not None and free<need*1024**3:
         raise OperationError(f"Only {int(free*10/1024**3)/10:g} GiB of memory is free; Windows needs {need} GiB. "
                              "Shut down the other VM or close apps first.")
 

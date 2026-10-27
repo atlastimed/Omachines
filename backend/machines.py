@@ -182,4 +182,5 @@ def host_resources():
         k,_,v=line.partition(":")
         if k in ("MemTotal","MemAvailable"):
             values[k]=int(v.split()[0])*1024
-    return {"cpu":os.cpu_count() or 1,"memoryBytes":values.get("MemTotal",0),"availableBytes":values.get("MemAvailable",0)}
+    # None, not 0, when the kernel gives no MemAvailable: a real 0 must refuse.
+    return {"cpu":os.cpu_count() or 1,"memoryBytes":values.get("MemTotal",0),"availableBytes":values.get("MemAvailable")}

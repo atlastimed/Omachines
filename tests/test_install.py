@@ -252,6 +252,25 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.entries(), [{"id":install.ID, "notify":False, "showLabel":False, "pollSeconds":600}])
         self.assertFalse(self.state.exists())
 
+    def test_edits_made_while_options_are_restored_are_kept(self):
+        data = self.read(); data["bar"]["layout"]["right"][1].update(pollSeconds=300, showLabel=False, asideEnabled=True); self.write(data)
+        self.invoke("--uninstall")
+        saved, edited = set(self.saved()["options"]), {}
+        def edit_during_restore(*args):
+            result = self.command(*args)
+            if args[2:3] == ("setBarWidget",) and not edited:
+                # Omarchy's settings change every field not yet restored.
+                data = self.read(); entry = next(e for e in data["bar"]["layout"]["right"] if e["id"] == install.ID)
+                for key in saved - set(entry):
+                    entry[key] = edited[key] = "changed in Omarchy"
+                self.write(data)
+            return result
+        self.run.side_effect = edit_during_restore
+        self.invoke()
+        self.assertTrue(edited)
+        entry = self.entries()[0]
+        self.assertEqual({key: entry[key] for key in edited}, edited)
+
     def test_update_leaves_removed_widget_off_and_present_options_alone(self):
         core.write_json(self.state, {"options":{"notify":True, "pollSeconds":300}, "placement":{"section":"left","index":0}})
         self.invoke()

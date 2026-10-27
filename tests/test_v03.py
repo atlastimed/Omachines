@@ -703,6 +703,14 @@ class WindowsMemoryTests(Base):
                 with self.assertRaisesRegex(core.OperationError, "Windows needs 8 GiB"): self.perform("start")
         self.priv.assert_not_called()
 
+    def test_zero_free_memory_refuses_but_an_unreadable_value_does_not(self):
+        self.free(0)
+        with self.assertRaisesRegex(core.OperationError, "^Only 0 GiB of memory is free; Windows needs 8 GiB"): self.perform("start")
+        self.priv.assert_not_called()
+        self.meminfo.write_text("MemTotal:       32000000 kB\nMemFree:  100 kB\n")
+        self.assertEqual(machines.host_resources()["availableBytes"], None)
+        self.perform("start"); self.priv.assert_called_once_with("up")
+
     def test_open_checks_memory_only_when_windows_is_stopped(self):
         self.free(2)
         with self.assertRaisesRegex(core.OperationError, "^Only 2 GiB"): self.perform("open")

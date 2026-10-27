@@ -140,9 +140,12 @@ def activate(shell, state):
     if not in_bar():
         raise RuntimeError("The shell did not add the bar entry")
     # Saved options fill only fields the entry lacks; values changed since the
-    # entry was added are never overwritten by an older saved copy.
-    entry, _ = bar_entry(read_config(shell))
+    # entry was added are never overwritten by an older saved copy. The entry
+    # is read again before each field, so an edit made while earlier fields
+    # were restored is kept. The shell has no set-if-absent call: only an edit
+    # landing between that read and its write could still be replaced.
     for key, value in state["options"].items():
+        entry, _ = bar_entry(read_config(shell))
         if key not in (entry or {}):
             shell_mutation("setBarWidget", ID, key, json.dumps(value), "{}")
     save_state({})
