@@ -33,6 +33,9 @@ came back running: a backup or resource change that left it stopped kept the pan
 backup catalogue and allocation stale until the next scheduled deep check. Any end of
 outside maintenance in a known state now triggers that check at once.
 
+A later Copilot pass noted that a backup forced off first whose restart then failed
+lost the "forced off first" note from its message; both messages now carry it.
+
 While adding those tests, one regression from the first system-review commit was
 found and fixed: `omarchy-vm start` had lost its wait for QEMU's monitor (it moved
 into the post-maintenance restart helper), so `start` returned before QEMU answered.

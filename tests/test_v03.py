@@ -603,6 +603,9 @@ class OperationTests(Base):
         self.assertIsInstance(failed, core.OperationError)
         self.assertEqual(str(failed), saved + ", but Omarchy VM did not start again: only 3 GiB of memory is free; "
                                               "Omarchy VM needs 8 GiB. Shut down the other VM or close apps first")
+        both, _, _ = self.perform("backup", ["Forced off: the guest did not shut down cleanly\n", saved + "\n",
+                                             "omarchy-vm: backup saved, but the VM did not start again: QEMU exited\n"], 1)
+        self.assertEqual(str(both), saved + " (the VM had to be forced off first), but Omarchy VM did not start again: QEMU exited")
         hidden, _, _ = self.perform("backup", [saved + "\n", "omarchy-vm: backup saved, but the VM did not start again: /dev/kvm busy\n"], 1)
         self.assertEqual(str(hidden), saved + ", but Omarchy VM did not start again: no reason was reported")
         # Without the saved line, nothing claims a backup.

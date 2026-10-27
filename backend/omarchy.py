@@ -312,6 +312,11 @@ def stream(action, argv, fallback, echo=False, progress=None):
     return report
 
 
+def forced(report):
+    # Said with every saved backup whose copy followed a forced, unclean shutdown.
+    return " (the VM had to be forced off first)" if report["forced"] else ""
+
+
 def focus(address):
     run(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:'+address+'" })'], 3)
 
@@ -363,12 +368,13 @@ def perform(action, config, parameters, machine):
             # After the saved line the backup is complete; only the restart failed.
             if not failure.report["saved"]:
                 raise
-            raise OperationError(failure.report["saved"] + ", but Omarchy VM did not start again: " +
+            raise OperationError(failure.report["saved"] + forced(failure.report) +
+                                 ", but Omarchy VM did not start again: " +
                                  (reason(failure.report["lines"], "backup saved, but the VM did not start again:")
                                   or "no reason was reported")) from None
         if not report["saved"]:
             raise OperationError("Backup completion could not be confirmed; check the backup list")
-        return (report["saved"] + (" (the VM had to be forced off first)" if report["forced"] else "") +
+        return (report["saved"] + forced(report) +
                 ("; Omarchy VM is starting again" if "starting" in report["stages"] else ""))
     if action == "verify":
         record(action, "running", "Checking backup integrity")
