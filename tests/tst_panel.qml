@@ -279,6 +279,52 @@ Window {
       mouseMove(aside,aside.width/2,aside.height/2);compare(view.cursorIndex,0);verify(!notify.hasCursor)
       keyClick(Qt.Key_Return);compare(sent(4),'{"asideEnabled":false}');compare(settingsSpy.count,5)
     }
+    function sceneY(item) { return item.mapToItem(null,0,0).y }
+    function test_empty_backup_hint_points_at_its_action() {
+      // The hint names the side of the row that does what it says; a real
+      // click on that row then does it. Omarchy VM creates a backup.
+      var windows=Object.assign({},view.machine,{backups:[],capabilities:Object.assign({},view.machine.capabilities,{admin:true})})
+      view.machine=omarchyMachine({backups:[]});keyClick(Qt.Key_3);compare(view.section,"Backups");wait(30)
+      var hint=findChild(view,"backup-details"),row=findChild(view,"action-backup")
+      compare(hint.text,"No backups yet. Create one below.")
+      verify(row.visible && sceneY(row)>=sceneY(hint)+hint.height)
+      mouseClick(row);compare(view.confirmation,"backup")
+      keyClick(Qt.Key_Escape);compare(view.confirmation,"");tryCompare(keys,"activeFocus",true)
+      // Windows finds existing backups through its catalogue refresh.
+      view.machine=windows;wait(30)
+      row=findChild(view,"action-inspect")
+      compare(hint.text,"Refresh the backup catalogue below to find existing backups.")
+      verify(row.visible && sceneY(row)>=sceneY(hint)+hint.height)
+      mouseClick(row);compare(actionSpy.count,1);compare(actionSpy.signalArguments[0][0],"inspect")
+    }
+    function test_outside_maintenance_disables_lifecycle_controls() {
+      // An omarchy-vm command run from a terminal or an agent blocks the same
+      // controls as an Omachines operation: real clicks and keys do nothing.
+      var cases=[[{state:"stopped",summary:"Backup in progress outside the panel",maintenance:"backup"},"start"],
+                 [{state:"running",summary:"Shutdown in progress outside the panel",maintenance:"stop"},"stop"]]
+      for (var i=0;i<cases.length;i++) {
+        var lifecycle=cases[i][1]
+        view.machine=omarchyMachine(Object.assign({},cases[i][0],{maintenance:null,summary:"Omarchy VM"}));keyClick(Qt.Key_1)
+        verify(findChild(view,"action-"+lifecycle).enabled)
+        view.machine=omarchyMachine(cases[i][0]);wait(30)
+        compare(findChild(view,"summary").text,cases[i][0].summary)
+        var row=findChild(view,"action-"+lifecycle);verify(!row.enabled);mouseClick(row)
+        var index=view.actions.map(function(a){return a.action}).indexOf(lifecycle)
+        tryCompare(keys,"activeFocus",true)
+        while (view.cursorIndex!==index) keyClick(Qt.Key_Down)
+        keyClick(Qt.Key_Return)
+        keyClick(Qt.Key_3)
+        for (var name of ["action-backup","restore-backup","verify-backup"]) { verify(!findChild(view,name).enabled,name);mouseClick(findChild(view,name)) }
+        keyClick(Qt.Key_4);verify(!findChild(view,"apply-allocation").enabled);mouseClick(findChild(view,"apply-allocation"))
+        compare(view.confirmation,"");compare(actionSpy.count,0)
+      }
+      // When it finishes, the same controls work again.
+      view.machine=omarchyMachine({state:"stopped",summary:"Omarchy VM is stopped"});wait(30)
+      verify(findChild(view,"apply-allocation").enabled);mouseClick(findChild(view,"apply-allocation"))
+      compare(view.confirmation,"allocate");keyClick(Qt.Key_Escape)
+      keyClick(Qt.Key_3);verify(findChild(view,"action-backup").enabled);verify(findChild(view,"restore-backup").enabled)
+      compare(actionSpy.count,0)
+    }
     function test_restore_confirmation_pins_selected_backup() {
       var parameters={backupId:"omachines-20260101T000000Z-abcdef"}
       view.choose({enabled:true,action:"restore",parameters:parameters})

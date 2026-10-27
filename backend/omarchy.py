@@ -23,7 +23,12 @@ PROBE = ("printf 'cpu=%s\\n' \"$(nproc)\"; "
          "if systemctl --user show-environment 2>/dev/null | grep -q '^HYPRLAND_INSTANCE_SIGNATURE='; "
          "then echo desktop=available; else echo desktop=unavailable; fi")
 STAGES = {"copying": "Copying the VM disk and firmware", "verifying": "Verifying the archive and checksum",
-          "starting": "Starting Omarchy VM again"}
+          "starting": "Starting Omarchy VM again", "restored": "Backup restored"}
+SAVED = re.compile(r"Backup omarchy-\d{8}T\d{6}Z saved and verified")
+UNIT_STATES = ("active", "activating", "deactivating", "reloading", "inactive", "failed")
+# omarchy-vm commands that hold its lifecycle lock, as the panel names them.
+MAINTENANCE = {"backup": "Backup", "restore": "Restore", "resources": "Resource change", "create": "VM creation",
+               "stop": "Shutdown"}
 
 
 def executable(path):
@@ -46,6 +51,10 @@ def stamp(value):
     return value if isinstance(value, str) and re.fullmatch(r"[0-9T:.+\-Z]{10,40}", value) else ""
 
 
+def known(value, names):
+    return value if isinstance(value, str) and value in names else None
+
+
 def label(value):
     return value.strip() if isinstance(value, str) and 1 <= len(value.strip()) <= 60 and not any(ord(c) < 32 for c in value) else ""
 
@@ -59,19 +68,36 @@ def parse_status(raw):
             "guest": guest if running and isinstance(guest, str) and re.fullmatch(r"[a-z][a-z-]{0,29}", guest) else None,
             "sshReady": running and raw.get("sshReady") is True, "viewerOpen": raw.get("viewerOpen") is True,
             "installMedia": isinstance(raw.get("installMedia"), str) and raw["installMedia"] != "",
-            "diskUsedBytes": number(raw.get("diskUsedBytes"))}
+            "diskUsedBytes": number(raw.get("diskUsedBytes")),
+            # Newer omarchy-vm: the systemd unit state and a lifecycle command
+            # holding its lock, from any terminal or agent. Unknown means absent.
+            "unitState": known(raw.get("unitState"), UNIT_STATES), "maintenance": known(raw.get("maintenance"), MAINTENANCE)}
 
 
 def status(machine):
     return parse_status(json.loads(run([control(machine), "status", "--json"], 8)))
 
 
+def outside(st, op):
+    # omarchy-vm runs a lifecycle command this machine's Omachines operation
+    # did not start; the panel treats it like its own operation.
+    return bool(st.get("maintenance")) and machine_operation(op, ID).get("status") not in ("starting", "running")
+
+
 def classify(st, op):
-    op = machine_operation(op, ID)
+    state, text = lifecycle(st, machine_operation(op, ID))
+    return state, (MAINTENANCE[st["maintenance"]] + " in progress outside the panel" if outside(st, op) else text)
+
+
+def lifecycle(st, op):
     if not st["running"]:
         if op.get("status") in ("starting", "running") and op.get("action") in ("backup", "restore"):
             return "stopped", "Backup in progress" if op["action"] == "backup" else "Restore in progress"
+        if st.get("unitState") == "failed":
+            return "stopped", "Omarchy VM stopped unexpectedly; check journalctl --user -u omarchy-vm"
         return "stopped", "Omarchy VM is stopped"
+    if st.get("unitState") == "deactivating":
+        return "stopping", "Omarchy VM is shutting down"
     guest = st["guest"]
     if guest == "running":
         return ("running", "Omarchy VM is reachable") if st["sshReady"] else ("starting", "Omarchy VM is starting")
@@ -83,6 +109,8 @@ def classify(st, op):
         return "starting", "Omarchy VM is starting"
     if guest in ("guest-panicked", "internal-error", "io-error", "watchdog"):
         return "error", "Omarchy VM needs attention; open it or force it off"
+    if st.get("unitState") == "activating":
+        return "starting", "Omarchy VM is starting"
     # QEMU is running (it uses RAM) but its monitor gave no usable state.
     return "error", "Omarchy VM is running; its monitor did not respond"
 
@@ -157,7 +185,7 @@ def collect(config, machine, deep=False, previous=None):
     op = operation()
     s = {"schemaVersion": 1, "checkedAt": now(), "demo": False, "capabilities": capabilities(machine), "operation": op,
          "checks": {}, "resources": {}, "error": "", "backups": [], "allocation": {}, "storage": {},
-         "sharedPath": machine["sharedPath"], "viewerOpen": False}
+         "sharedPath": machine["sharedPath"], "viewerOpen": False, "maintenance": None}
     try:
         usage = shutil.disk_usage(machine["storagePath"])
         s["storage"] = {"availableBytes": usage.free, "totalBytes": usage.total}
@@ -180,14 +208,15 @@ def collect(config, machine, deep=False, previous=None):
     s["viewerOpen"] = st["viewerOpen"]
     s["vmDiskBytes"] = st["diskUsedBytes"]
     s["state"], s["summary"] = classify(st, op)
+    s["maintenance"] = st["maintenance"] if outside(st, op) else None
     if deep or not previous:
         for key, read in (("backups", backups), ("allocation", allocation)):
             try:
                 s[key] = read(machine)
             except (OperationError, ValueError, OSError):
                 pass
-    if s["state"] not in ("running", "starting"):
-        message = ("Unavailable during this operation" if s["summary"].endswith("in progress") else
+    if s["maintenance"] or s["state"] not in ("running", "starting"):
+        message = ("Unavailable during this operation" if s["maintenance"] or s["summary"].endswith("in progress") else
                    "Start Omarchy VM to check its connections" if s["state"] == "stopped" else s["summary"])
         for name in ("ssh", "desktop", "cua"):
             s["checks"][name] = check("offline", message)
@@ -202,7 +231,7 @@ def collect(config, machine, deep=False, previous=None):
             s["checks"], s["resources"] = carried_checks(previous), previous.get("resources", {})
             if s["error"]:
                 s["summary"] = "Omarchy VM is reachable; connection checks failed"
-            elif previous.get("state") == "running" and fresh_checks(previous, config["pollSeconds"]):
+            elif previous.get("state") == "running" and not previous.get("maintenance") and fresh_checks(previous, config["pollSeconds"]):
                 s["summary"] = previous.get("summary", s["summary"])
             else:
                 s["summary"] = "Omarchy VM is reachable; connection checks are due"
@@ -231,21 +260,36 @@ def collect(config, machine, deep=False, previous=None):
 
 # Operations. The caller holds the operation lock and validated parameters.
 
-def sanitize(lines, fallback):
-    # omarchy-vm reports failures as "omarchy-vm: <reason>". Show a short
-    # reason without paths; never forward other command output.
+class Failed(OperationError):
+    # A failed omarchy-vm command, with what it reported before failing.
+    def __init__(self, message, report):
+        super().__init__(message)
+        self.report = report
+
+
+def reason(lines, lead=""):
+    # omarchy-vm reports failures as "omarchy-vm: <reason>". Return a short
+    # reason without paths, after an expected lead-in; never other output.
     for line in reversed(lines):
         if line.startswith("omarchy-vm: "):
-            reason = line[12:].strip()
-            if reason and len(reason) <= 160 and "/" not in reason and all(c.isprintable() for c in reason):
-                return reason[0].upper() + reason[1:]
-    return fallback
+            text = line[12:].strip()
+            text = text[len(lead):].strip() if lead and text.startswith(lead) else text
+            if text and len(text) <= 160 and "/" not in text and all(c.isprintable() for c in text):
+                return text.rstrip(".")
+    return ""
+
+
+def sanitize(lines, fallback):
+    text = reason(lines)
+    return text[0].upper() + text[1:] if text else fallback
 
 
 def stream(action, argv, fallback, echo=False, progress=None):
+    # omarchy-vm never needs the operation terminal: it runs detached, so
+    # closing that terminal or Ctrl+C there cannot interrupt it.
     from operations import provider, record, say
-    lines, stages = [], []
-    with provider(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+    report = {"lines": [], "stages": [], "forced": False, "saved": ""}
+    with provider(argv, detach=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                   text=True, errors="replace", bufsize=1) as p:
         for raw in p.stdout:
             if echo:
@@ -254,16 +298,18 @@ def stream(action, argv, fallback, echo=False, progress=None):
             if line.startswith("OMACHINES_STAGE:"):
                 stage = line.partition(":")[2]
                 if stage in STAGES:
-                    stages.append(stage)
+                    report["stages"].append(stage)
                     record(action, "running", STAGES[stage])
             elif line:
                 for prefix, message in (progress or {}).items():
                     if line.startswith(prefix):
                         record(action, "running", message)
-                lines = (lines + [line])[-4:]
+                report["forced"] = report["forced"] or line.startswith("Forced off:")
+                report["saved"] = line if SAVED.fullmatch(line) else report["saved"]
+                report["lines"] = (report["lines"] + [line])[-4:]
     if p.returncode:
-        raise OperationError(sanitize(lines, fallback))
-    return lines, stages
+        raise Failed(sanitize(report["lines"], fallback), report)
+    return report
 
 
 def focus(address):
@@ -300,8 +346,8 @@ def perform(action, config, parameters, machine):
         return "Omarchy VM started; connections may take a moment"
     if action == "stop":
         record(action, "running", "Shutting down Omarchy VM")
-        stream(action, [ctl, "stop"], "Omarchy VM did not shut down; check it before forcing it off")
-        return "Omarchy VM shut down"
+        report = stream(action, [ctl, "stop"], "Omarchy VM did not shut down; check it before forcing it off")
+        return "Omarchy VM was forced off; it did not shut down cleanly" if report["forced"] else "Omarchy VM shut down"
     if action == "shared":
         path = Path(machine["sharedPath"])
         if not path.is_dir():
@@ -310,12 +356,20 @@ def perform(action, config, parameters, machine):
         return "Shared folder opened"
     if action == "backup":
         record(action, "running", "Preparing a complete Omarchy VM backup")
-        lines, stages = stream(action, [ctl, "backup"], "Backup did not finish; Omarchy VM may need starting",
-                               progress={"Shutting down": "Shutting down Omarchy VM for a consistent copy"})
-        saved = next((l for l in reversed(lines) if re.fullmatch(r"Backup omarchy-\d{8}T\d{6}Z saved and verified", l)), "")
-        if not saved:
+        try:
+            report = stream(action, [ctl, "backup"], "Backup did not finish; Omarchy VM may need starting",
+                            progress={"Shutting down": "Shutting down Omarchy VM for a consistent copy"})
+        except Failed as failure:
+            # After the saved line the backup is complete; only the restart failed.
+            if not failure.report["saved"]:
+                raise
+            raise OperationError(failure.report["saved"] + ", but Omarchy VM did not start again: " +
+                                 (reason(failure.report["lines"], "backup saved, but the VM did not start again:")
+                                  or "no reason was reported")) from None
+        if not report["saved"]:
             raise OperationError("Backup completion could not be confirmed; check the backup list")
-        return saved + ("; Omarchy VM is starting again" if "starting" in stages else "")
+        return (report["saved"] + (" (the VM had to be forced off first)" if report["forced"] else "") +
+                ("; Omarchy VM is starting again" if "starting" in report["stages"] else ""))
     if action == "verify":
         record(action, "running", "Checking backup integrity")
         stream(action, [ctl, "verify", parameters["backupId"]], "Backup integrity check failed")
@@ -358,8 +412,16 @@ def perform(action, config, parameters, machine):
         if typed != "RESTORE " + name:
             raise OperationError("Restore cancelled; Omarchy VM is unchanged")
         record(action, "running", "Verifying the backup before replacement")
-        stream(action, [ctl, "restore", name, "--replace-current"], "Restore did not finish; check this terminal before retrying",
-               echo=True, progress={"Shutting down": "Shutting down Omarchy VM", "Restored": "Backup restored; starting if it was running"})
+        try:
+            stream(action, [ctl, "restore", name, "--replace-current"], "Restore did not finish; check this terminal before retrying",
+                   echo=True, progress={"Shutting down": "Shutting down Omarchy VM"})
+        except Failed as failure:
+            # Other failures leave the current disk in place.
+            if "restored" not in failure.report["stages"]:
+                raise
+            raise OperationError("Omarchy VM was restored from " + name + " but did not start: " +
+                                 (reason(failure.report["lines"], "restored, but the VM did not start again:") or "no reason was reported") +
+                                 ". The previous disk was kept aside") from None
         return "Omarchy VM restored from " + name + "; the previous disk was kept aside"
     if action == "connections":
         folder = state_dir()/"reports"

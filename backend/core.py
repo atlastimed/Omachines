@@ -278,9 +278,10 @@ def fresh_checks(previous, interval):
 
 def carried_checks(previous):
     # Shallow polls keep the last deep evidence, except evidence from a state
-    # without SSH: once SSH answers again it says nothing until a deep check.
+    # without SSH or during outside maintenance: once SSH answers again it
+    # says nothing until a deep check.
     checks = dict(previous.get("checks", {}))
-    if previous.get("state") not in ("running", "unknown"):
+    if previous.get("state") not in ("running", "unknown") or previous.get("maintenance"):
         checks = {name: check("unknown", "Connection checks are due") for name in checks}
     return checks
 

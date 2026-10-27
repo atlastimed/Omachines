@@ -82,16 +82,29 @@ kernel/hypervisor exploit. Guest code is never trusted as a host command source.
 The Omarchy VM provider runs only the fixed user-owned commands `omarchy-vm`,
 `omarchy-vm-ssh` and `omarchy-vm-mcp` from `~/.local/bin`. It needs no root,
 sudo, polkit or password and adds no privileged code; the administrator helper is
-not used for it. Registry entries with other paths are refused. Status, catalogue
-and guest-probe output is reduced to known fields; failure reasons are shown only
-when they are short `omarchy-vm:` messages without paths.
+not used for it. Paths stored in the registry are never used; they are replaced by
+the provider's own definition. Status, catalogue and guest-probe output is reduced
+to known fields; failure reasons are shown only when they are short `omarchy-vm:`
+messages without paths.
 
 Agents connected through `omarchy-vm-ssh` get **passwordless sudo inside that
 guest**. That is root in the VM only, not on the host, but it covers everything in
 the guest, including its signed-in accounts and the shared folder. The shared
 folder `~/OmarchyVM` (guest `~/Shared`) is writable from the guest: treat its
-contents as untrusted, and do not put host secrets there. The VM's QEMU process
-runs as the desktop user.
+contents as untrusted, and do not put host secrets there. QEMU shares it in
+`mapped-xattr` mode, so guest files arrive as private, non-executable plain files
+and guest links never become host links; nothing limits how much the guest writes.
+The VM's QEMU process runs as the desktop user.
+
+The Omarchy VM's network (passt) reaches the internet and the local network but
+not services that listen only on the host's loopback, and accepts no inbound
+connections. SSH uses vsock, not the network. The guest has sound output but no
+microphone. While the viewer is open, text copied in the guest replaces the host
+clipboard.
+
+Everything an agent reads from either guest (screens, files, clipboard text,
+command output and Omachines' connection reports) can contain text written to
+steer it. Agents on the host should treat it as data, not instructions.
 
 Omarchy VM backups in `~/Omarchy-VM-Backups/` contain the whole guest disk,
 including any credentials and signed-in sessions, plus the host-side SSH

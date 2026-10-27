@@ -56,9 +56,10 @@ sudo /usr/bin/python3 -I scripts/install-admin.py
 ```
 
 Both commands are repeated when updating code that changes the administrator
-helper. Version 0.3.1 updates it to 0.3.1: a Windows restore asks for its typed
-confirmation before extracting the backup, so a cancelled restore leaves no copy
-behind. (0.3.0 made rollback detect every mount of the Windows storage.) The
+helper; the installer says when the installed helper is older. Version 0.3.1
+updates it to 0.3.1: a Windows restore asks for its typed confirmation and takes
+the lifecycle lock before extracting the backup, so a cancelled or refused restore
+leaves no copy behind, and a refused backup leaves no incomplete folder. (0.3.0 made rollback detect every mount of the Windows storage.) The
 Omarchy VM provider needs no helper. Read the source before installing privileged code. The helper is copied
 root-owned into `/usr/local/lib/omachines/`; old helper versions are retained there.
 Each administrative operation still asks for authorization in a visible terminal.
@@ -87,10 +88,12 @@ python3 install.py --setup-workspace /absolute/path/to/WindowsVM
 
 The versioned machine registry (schema 2), selected machine and bounded history
 live in `~/.local/state/omachines/`. Migration from the v0.2 registry keeps the
-Windows entry unchanged, adds the Omarchy VM and retains the old file as
-`machines-v1.json`. Each provider has fixed connection paths; unsupported providers
-or changed connections fail closed. `omachinesctl select <windows|omarchy>` and
-`omachinesctl machines` select and list machines from a terminal. See
+Windows entry's name, adds the Omarchy VM and retains the old file as
+`machines-v1.json`. Each provider has fixed connection paths that always come from
+this release: a stored registry is rewritten to them, keeping the selection, and
+unsupported providers fail closed. From this folder, `backend/omachinesctl select
+<windows|omarchy>` and `backend/omachinesctl machines` select and list machines.
+See
 [integration requirements](INTEGRATION.md) for each provider's contract.
 
 ## Backups and recovery
@@ -134,6 +137,9 @@ still runs: a stopped worker first waits for the command and records its result.
 If the worker is killed outright, the panel shows the operation as still running
 until the command ends, then as interrupted.
 
+Starting Windows from the panel is refused while less memory is free than its RAM
+allocation, which could otherwise get it or the Omarchy VM killed.
+
 CPU/RAM changes check host capacity and available memory before shutdown, preserve
 unrelated compose settings, and restart Windows only if it was running. The original
 compose file is retained. If container startup fails, the helper attempts to recover
@@ -150,15 +156,19 @@ was. If Windows does not finish starting, it is shut down and nothing is backed 
 `omarchy-vm backup` stops the VM if it is running, archives its disk and firmware
 variables with its host-side configuration (never its private SSH key) into
 `~/Omarchy-VM-Backups/<id>/`, verifies the SHA-256 and contents, and restarts it
-if it was running. No password is needed, so it runs in the background and the
+if it was running. If the VM had to be forced off first, or does not start again,
+the panel says so; the backup is kept either way. No password is needed, so it runs in the background and the
 panel shows its stages. Keep that folder on encrypted storage. **Verify integrity**
 rechecks a backup; names given in the panel are stored privately by Omachines and
 do not change the backup's own manifest.
 
 **Restore Omarchy VM** opens a terminal that asks you to type `RESTORE <id>`. It
-then verifies the archive, stops the VM, keeps the current disk aside in the VM
-storage directory as `previous-<time>/`, extracts the backup and restarts the VM if
-it was running. Shared-folder files are separate. CPU/RAM changes are saved by
+then verifies the archive and extracts it beside the VM, and only then stops the VM,
+keeps the current disk aside in the VM storage directory as `previous-<time>/` and
+swaps in the backup; it restarts the VM if it was running. Closing that terminal
+does not interrupt the restore. Backups, restores and allocation changes started
+from a terminal or by an agent show as "in progress outside the panel" and disable
+the same controls. Shared-folder files are separate. CPU/RAM changes are saved by
 `omarchy-vm resources` and restart a running VM; the panel limits them to 16 CPUs
 and leaves at least 4 GiB of host RAM.
 

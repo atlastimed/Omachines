@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "oma
 STATE = "installer.json"
 SECTIONS = ("left", "center", "right")
 DEFAULT_PLACEMENT = {"section": "right", "index": 1}
+HELPER = Path("/usr/local/lib/omachines/admin.py")
 
 
 def run(*args):
@@ -157,6 +159,24 @@ def rescan(present):
     raise RuntimeError("The shell did not finish scanning the plugin")
 
 
+def helper_version(path):
+    # The VERSION="x.y.z" line of an administrator helper, as numbers.
+    try:
+        match = re.search(r'(?m)^VERSION="(\d{1,4})\.(\d{1,4})\.(\d{1,4})"$', path.read_text())
+    except (OSError, UnicodeError):
+        return None
+    return tuple(map(int, match.groups())) if match else None
+
+
+def helper_notice():
+    # The optional root helper is installed separately; say when it is older.
+    installed, release = helper_version(HELPER), helper_version(ROOT/"backend/admin.py")
+    if not installed or not release or installed >= release:
+        return ""
+    return (f"The administrator helper is {'.'.join(map(str, installed))}; this release includes "
+            f"{'.'.join(map(str, release))}. Reinstall it: sudo /usr/bin/python3 -I scripts/install-admin.py")
+
+
 def stage_release(staged):
     # Some installed Quickshell versions retain cached QML after rescan.
     # Content-addressed entry paths load fresh components without restarting
@@ -263,6 +283,9 @@ def install(args):
           else "Omachines installed. Click VM in the bar." if pending
           else "Omachines updated; its bar entry was left as it was.")
     print("Previous configuration: " + str(backup))
+    notice = "" if args.uninstall else helper_notice()
+    if notice:
+        print(notice)
 
 
 def main(argv=None):

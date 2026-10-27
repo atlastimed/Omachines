@@ -3,7 +3,9 @@
 function gib(value) { return typeof value === "number" ? (value / 1073741824).toFixed(1) + " GiB" : "Not checked" }
 function freeSpace(value) { return typeof value === "number" ? gib(value) + " free" : "Not checked" }
 function checked(state, name) { return state && state.checks && state.checks[name] ? state.checks[name] : {status:"unknown", message:"Not checked yet"} }
-function active(state) { var op = state.operation || {}; return op.status === "running" || op.status === "starting" }
+// An Omachines operation, or an omarchy-vm lifecycle command started outside
+// the panel (maintenance), disables the same controls.
+function active(state) { var op = state.operation || {}; return op.status === "running" || op.status === "starting" || !!state.maintenance }
 function ago(value, now) {
   var time = Date.parse(value || "")
   if (!isFinite(time)) return "Not checked"

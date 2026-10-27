@@ -1,5 +1,44 @@
 # Review fixes
 
+## 27 October 2026 system review (v0.3.1)
+
+A second three-reviewer pass covered the whole system: this plugin, the Omarchy VM
+tooling (`omarchy-vm`, kept outside this repository), the Windows VM and how they
+connect. Findings outside this repository were fixed in the Omarchy VM tooling and
+documented in its README; this section lists what changed here and what this
+repository relies on.
+
+| Area | Change | Regression evidence |
+| --- | --- | --- |
+| Omarchy VM lifecycle outside the panel | `omarchy-vm` now holds a lifecycle lock for backup, restore, resources, create and stop, and reports `unitState` and `maintenance` in `status --json`. The provider reads both through allowlists: a lifecycle command no Omachines operation started shows as "<name> in progress outside the panel", disables the same controls as an Omachines operation, skips guest probes and is followed by an immediate deep check. `deactivating` shows as shutting down, `failed` as stopped unexpectedly, `activating` as starting. | Unit-state and maintenance validation and classification, outside maintenance named unless it is ours, checks skipped and due again afterwards, daemon recheck, and real key presses and clicks on the panel while it lasts. |
+| Results the panel could misreport | A stop that ended by forcing QEMU off, a backup forced off first, a backup saved whose restart failed, and a restore swapped whose restart failed are each reported as such, instead of as success or as a failed backup or restore. | Fake `omarchy-vm` output for each case, including reasons that are hidden because they contain paths. |
+| Terminal closed during an Omarchy VM restore | Omarchy VM commands run detached in their own session, so the operation terminal's hangup, termination and Ctrl+C reach only the worker, which waits and records the result. Windows commands stay attached because sudo needs the terminal. | Real worker processes: the provider's session differs from the worker's and is led by the supervisor; only detached providers get one. |
+| Registry lock-out | Fixed fields and connections always come from the code. A stored registry is rewritten atomically on load, keeping the selection and a valid name; a migration never overwrites a file changed meanwhile. Previously any change to the fixed fields, such as the Omarchy VM leaving TCP SSH, made both machines unusable. | Stored fixed fields replaced and selection kept, tampered connections never run, invalid names and list-valued providers fail safe, concurrent change preserved. |
+| Starting Windows with too little memory | Start, open and the backup path that starts Windows refuse while less memory is free than its RAM allocation; systemd-oomd could otherwise kill a VM outright. | Short and sufficient memory, unknown allocation, already running. |
+| Root helper staging | Restore takes the lifecycle lock before extracting; a failed extraction or shutdown removes its staging copy. Backup creates its `.incomplete` folder only once both locks are held. The rehearsal screen capture is copied only as a plain file of bounded size, never through a link. | Real tar failure on a junk archive, a held flock, failed shutdown, ordering, refused backup, symlink, FIFO and oversized captures. |
+| Installer and wording | The installer says when the installed helper is older than the release. The empty-backup hint points below, where its action is. | Version comparison and silence when no helper; hint position checked against the rows and clicked. |
+
+### Verification
+
+`python3 scripts/check.py` passes 187 Python tests, manifest validation, qmllint
+without warnings and 35 native Qt passes.
+
+Live, against the real Omarchy VM after it moved to passt networking and SSH over
+vsock (throwaway Omachines state where the plugin's code ran): the deep check from
+this branch reported SSH, desktop and Cua ready; holding `omarchy-vm`'s lifecycle
+lock made the panel's state read "Backup in progress outside the panel" with
+checks paused; and `omarchy-vm` itself refused start and view during it, stopped
+cleanly over SSH and over the ACPI button, made a backup (`cleanShutdown` true,
+71 s) and restored it through the journaled swap (66 s, the guest's newer file
+gone, the previous disk kept, normal boot).
+
+### Limits
+
+Windows paths were again exercised with fakes only. The forced-stop messages were
+tested with fake output; the real VM was not forced off. Helper 0.3.1 must be
+reinstalled for the helper changes, and the installed plugin updated, before the
+installed panel reads the new status fields.
+
 ## 27 October 2026 review (v0.3.1)
 
 An independent three-reviewer pass over `c6071e1` reported one P1 and seven P2

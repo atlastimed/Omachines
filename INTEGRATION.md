@@ -96,27 +96,34 @@ nor CLI account status launches a model-backed task or proves model entitlement.
 
 ## Version 0.3 Omarchy VM provider (`omarchy-qemu`)
 
-The machine `omarchy` uses fixed paths; changing any of them in the registry fails
-closed. It is listed only while `~/.local/bin/omarchy-vm` is an executable file.
+The machine `omarchy` uses fixed paths. They always come from Omachines' own
+definition: a stored registry is rewritten to it on load, keeping only the selection
+and a valid display name, and unknown providers or identities fail closed. It is
+listed only while `~/.local/bin/omarchy-vm` is an executable file.
 Everything runs as the desktop user: no root, sudo, polkit or terminal password.
 
 | Capability | Expected local integration |
 | --- | --- |
-| Status | `omarchy-vm status --json` prints `{"running", "guest", "sshReady", "viewerOpen", "installMedia", "diskUsedBytes"}` quickly, without SSH. `guest` is QEMU's run state (`running`, `paused`, ...) or `null`; `sshReady` means an SSH banner on `127.0.0.1:2223`. Only these fields are read; the install-media path is reduced to a boolean. |
-| Start/stop | `omarchy-vm start` starts the systemd user unit `omarchy-vm.service`; `omarchy-vm stop` shuts the guest down cleanly over SSH with an ACPI fallback. The panel never uses `stop --force`. |
+| Status | `omarchy-vm status --json` prints `{"running", "unitState", "maintenance", "guest", "sshReady", "viewerOpen", "installMedia", "diskUsedBytes"}` quickly, without SSH. `guest` is QEMU's run state (`running`, `paused`, ...) or `null`; `sshReady` means an SSH banner from the guest's sshd over vsock (context ID 2223, port 22). `unitState` is the unit's systemd `ActiveState`; `deactivating` shows as shutting down and `failed` as stopped unexpectedly. `maintenance` is `null` or the lifecycle command holding omarchy-vm's lock (`backup`, `restore`, `resources`, `create`, `stop`). Only these fields are read, unknown values count as absent, and the install-media path is reduced to a boolean. |
+| Lifecycle lock | `backup`, `restore`, `resources`, `create` and `stop` hold `$XDG_RUNTIME_DIR/omarchy-vm/lifecycle.lock`; `start`, `view` and the unit itself refuse with `omarchy-vm: maintenance in progress (<name>); try again when it finishes`. When one runs that no Omachines operation started, the panel shows "<name> in progress outside the panel", disables the same controls as during its own operations and skips the guest probes; when it ends, a deep check runs at once. `start` and `view` also refuse when less memory is free than the VM's allocation. |
+| Start/stop | `omarchy-vm start` starts the systemd user unit `omarchy-vm.service`; `omarchy-vm stop` shuts the guest down cleanly over SSH with an ACPI fallback, and prints `Forced off: the guest did not shut down cleanly` before `Omarchy VM is stopped` when QEMU had to be stopped instead. The panel reports that as a forced stop and never uses `stop --force`. |
 | Viewer | `omarchy-vm view` starts the VM if needed and opens a viewer (Hyprland class `remote-viewer`, title starting `Omarchy VM`). Omachines focuses an existing viewer itself. Closing it leaves the VM running. |
-| Backups | `omarchy-vm backup` stops a running VM, writes `~/Omarchy-VM-Backups/<id>/{vm.tar,SHA256SUMS,manifest.json}`, verifies it and restarts the VM if it was running. Progress lines `OMACHINES_STAGE:copying`, `verifying` and optionally `starting`, then `Backup <id> saved and verified`. Nonzero exit on failure, with `omarchy-vm: <reason>` on stderr. Identities match `omarchy-\d{8}T\d{6}Z`. |
+| Backups | `omarchy-vm backup` stops a running VM, writes `~/Omarchy-VM-Backups/<id>/{vm.tar,SHA256SUMS,manifest.json}`, verifies it and restarts the VM if it was running. Progress lines `OMACHINES_STAGE:copying`, `verifying`, then `Backup <id> saved and verified`, then optionally `OMACHINES_STAGE:starting`. Nonzero exit on failure, with `omarchy-vm: <reason>` on stderr. A nonzero exit after the saved line means only the restart failed (`omarchy-vm: backup saved, but the VM did not start again: <reason>`). The manifest's `cleanShutdown` is false when the VM was forced off first. Identities match `omarchy-\d{8}T\d{6}Z`. |
 | Catalogue | `omarchy-vm backups --json` lists `{id, label, createdAt, bytes, verified, verifiedAt, restoreTested, ...}`. Omachines keeps only those fields, never the path. |
-| Verify/restore | `omarchy-vm verify <id>`; `omarchy-vm restore <id> --replace-current` verifies, stops the VM, keeps the current disk in the VM storage directory as `previous-<time>/`, extracts and restarts it if it was running. |
+| Verify/restore | `omarchy-vm verify <id>`; `omarchy-vm restore <id> --replace-current` verifies and extracts beside the running VM, then stops it and swaps the files under a journal (`restore-journal.json` in the VM storage directory, which blocks starts if a crash interrupts the swap). The current disk is kept as `previous-<time>/`. `OMACHINES_STAGE:restored` follows the swap; the VM restarts only if it was running (`OMACHINES_STAGE:starting`). A nonzero exit after `restored` means only the restart failed (`omarchy-vm: restored, but the VM did not start again: <reason>`); before it, the current disk is unchanged. |
 | CPU/RAM | `omarchy-vm resources` prints `{"cpus", "memory", "hostCpus"}`; `resources --cpus N --memory NG` saves the allocation and restarts a running VM. The tool accepts at most 16 CPUs and `99G`, leaving 4 GiB for the host. |
-| Command checks | `~/.local/bin/omarchy-vm-ssh '<command>'` runs one command as the guest user with BatchMode and a pinned host key. One read-only probe returns CPU count, memory, root filesystem size/free, and whether `systemctl --user show-environment` contains `HYPRLAND_INSTANCE_SIGNATURE=` (the auto-signed-in Hyprland session). |
+| Command checks | `~/.local/bin/omarchy-vm-ssh '<command>'` runs one command as the guest user over vsock, with BatchMode and a pinned host key. One read-only probe returns CPU count, memory, root filesystem size/free, and whether `systemctl --user show-environment` contains `HYPRLAND_INSTANCE_SIGNATURE=` (the auto-signed-in Hyprland session). |
 | Desktop tools | `~/.local/bin/omarchy-vm-mcp` is Cua Driver's stdio MCP in that session. `health_report` must return `structuredContent` with `schema_version` `"1"` and `overall` `"ok"`, the same schema as on Windows. |
 | Shared files | `~/OmarchyVM` on the host; the guest sees it as `~/Shared`. |
 | Storage | VM storage `/mnt/windows-vm/omarchy` (free space is shown); configuration `~/.config/omarchy-vm/config.json` (read only through `omarchy-vm`). |
 
 The 15-second poll runs only `status --json`. The deep check (every check interval,
 or **Check connections**) adds the SSH probe, then Cua health when the desktop
-session is up. The catalogue and allocation are read on deep checks. Aside, the
+session is up. After SSH comes back, deep checks repeat about every 20 seconds for
+up to 5 minutes until the desktop and Cua are ready, so a guest still signing in
+does not wait for the next interval. Omarchy VM commands run in their own session,
+detached from the operation terminal: closing it or pressing Ctrl+C there cannot
+interrupt them. The catalogue and allocation are read on deep checks. Aside, the
 recovery console, console handoff, the administrator helper and offline-boot
 rehearsal do not exist for this provider; its capabilities hide them.
 

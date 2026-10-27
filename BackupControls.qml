@@ -56,9 +56,11 @@ Column {
     Button { objectName:"verify-backup"; text:"Verify integrity"; focusable:true; foreground:root.foreground; enabled:root.backupId!=="" && !!root.caps.verify; onClicked:root.request("verify",{backupId:root.backupId}) }
   }
   Text {
+    // The panel's action rows, including create and refresh, follow these controls.
+    objectName:"backup-details"
     width:parent.width; textFormat:Text.PlainText; wrapMode:Text.WordWrap
     color:root.foreground; font.family:root.fontFamily; font.pixelSize:root.fontTokens.bodySmall
-    text: !root.backupId ? (root.caps.catalogue === true ? "Refresh the backup catalogue to find existing backups." : "No backups yet. Create one above.") :
+    text: !root.backupId ? (root.caps.catalogue === true ? "Refresh the backup catalogue below to find existing backups." : "No backups yet. Create one below.") :
       (root.selected.bytes ? Model.gib(root.selected.bytes)+" · " : "") + new Date(root.selected.createdAt).toLocaleString() + "\n" +
       (root.selected.verified ? (root.selected.verifiedAt ? "Integrity verified" : "Verified by existing setup record") : "Integrity not verified") + (root.selected.verifiedAt ? " · "+new Date(root.selected.verifiedAt).toLocaleString() : "") + "\n" +
       (root.caps.rehearsal === true ? (root.selected.restoreTested ? "Offline restore boot reviewed" : "Restore boot not yet reviewed") :

@@ -16,6 +16,9 @@ import machines
 from operations import ACTIONS, request_action, worker
 from probes import close_all, install_shutdown_handlers
 
+FOLLOW_EVERY=20   # seconds between follow-up deep checks after SSH returns
+FOLLOW_FOR=300    # and for how long
+
 
 def emit(value):
     print(json.dumps(value,ensure_ascii=False,separators=(",",":")),flush=True)
@@ -32,8 +35,22 @@ def stale(result, config):
 
 
 def regained(old, new):
-    return (new.get("state")=="running" and old.get("state") not in ("running","unknown","checking")
-            and old.get("machineId")==new.get("machineId"))
+    # SSH answers again: the machine came back, or outside maintenance ended.
+    return (new.get("state")=="running" and not new.get("maintenance") and old.get("machineId")==new.get("machineId")
+            and (old.get("state") not in ("running","unknown","checking") or bool(old.get("maintenance"))))
+
+
+def follow_up(snapshot, since, last, clock):
+    """After SSH came back at `since`, whether another deep check is due now
+    (True), later (False) or no longer needed (None). A guest still signing in
+    is checked about every 20 s for 5 minutes, never during an operation."""
+    checks=snapshot.get("checks",{})
+    waiting=(checks.get("desktop",{}).get("status")!="available"
+             or checks.get("cua",{}).get("status") not in ("ready","missing"))
+    if (since is None or not waiting or clock-since>FOLLOW_FOR or snapshot.get("state")!="running"
+            or snapshot.get("maintenance")):
+        return None
+    return snapshot.get("operation",{}).get("status") not in ("starting","running") and clock-last>=FOLLOW_EVERY
 
 
 def select(machine_id, snapshot):
@@ -61,6 +78,8 @@ def daemon():
     pending_deep=False
     due=0
     deep_due=0
+    deep_at=0
+    since=None    # when SSH last came back, while follow-up checks may be due
     requested=False
     buffer=b""
     emit(snapshot)
@@ -75,10 +94,15 @@ def daemon():
                 else:
                     # SSH has just become reachable: check the connections
                     # now instead of at the next deep poll.
-                    if regained(snapshot,result) and not pending_deep:
-                        requested=True
+                    if regained(snapshot,result):
+                        since=clock
+                        requested=requested or not pending_deep
                     snapshot=result
                     emit(snapshot)
+            if not pending and not requested:
+                due_now=follow_up(snapshot,since,deep_at,clock)
+                since=None if due_now is None else since
+                requested=bool(due_now)
             if not pending and (requested or clock>=due):
                 deep=(requested or clock>=deep_due) and snapshot.get("operation",{}).get("status") not in ("starting","running")
                 pending=pool.submit(refresh_snapshot,dict(config),dict(snapshot),deep)
@@ -86,6 +110,7 @@ def daemon():
                 requested=False
                 due=clock+15
                 if deep:
+                    deep_at=clock
                     deep_due=clock+config["pollSeconds"]
             op=operation() if not config["demo"] else {}
             if op!=snapshot.get("operation",{}):
@@ -125,6 +150,7 @@ def daemon():
                         snapshot=select(command.get("machineId"),snapshot)
                         emit(snapshot)
                         requested=True
+                        since=None
                     else:
                         raise OperationError("Unknown command")
                 except Exception as error:

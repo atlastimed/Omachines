@@ -31,6 +31,8 @@ class InstallerTests(unittest.TestCase):
         self.patch(patch.dict(os.environ, {"XDG_STATE_HOME":str(self.home/"state")}))
         self.run = self.patch(patch("install.run", side_effect=self.command))
         self.patch(patch("install.subprocess.run"))  # rollback IPC only
+        self.helper = self.home/"admin.py"  # never the host's installed helper
+        self.patch(patch("install.HELPER", self.helper))
         self.hook = lambda: None
         self.mutations = []
         self.state = core.state_dir()/"installer.json"
@@ -278,6 +280,32 @@ class InstallerTests(unittest.TestCase):
         self.invoke("--uninstall")
         self.invoke("--setup-workspace", str(work))
         self.assertEqual(self.entries(), [{"id":install.ID, "notify":False, "setupWorkspace":str(work)}])
+
+    def output(self, *args):
+        out = io.StringIO()
+        with redirect_stdout(out): install.main(list(args))
+        return out.getvalue()
+
+    def test_older_administrator_helper_is_reported_after_install(self):
+        release = ".".join(map(str, install.helper_version(ROOT/"backend/admin.py")))
+        self.helper.write_text('#!/usr/bin/env python3\nVERSION="0.3.0"\n')
+        self.assertIn("The administrator helper is 0.3.0; this release includes " + release +
+                      ". Reinstall it: sudo /usr/bin/python3 -I scripts/install-admin.py\n", self.output())
+        # Removal never asks for a helper reinstall.
+        self.assertNotIn("administrator helper", self.output("--uninstall"))
+
+    def test_helper_versions_compare_numerically_and_missing_is_silent(self):
+        with patch("install.ROOT", self.home):
+            (self.home/"backend").mkdir(); (self.home/"backend/admin.py").write_text('VERSION="0.10.2"\n')
+            self.assertEqual(install.helper_notice(), "")  # no helper installed: it is optional
+            for installed, notice in (("0.9.9", True), ("0.10.1", True), ("0.10.2", False), ("0.10.10", False), ("1.0.0", False)):
+                with self.subTest(installed=installed):
+                    self.helper.write_text('VERSION="%s"\n' % installed)
+                    self.assertEqual(bool(install.helper_notice()), notice)
+            self.helper.write_text("no version line\n")
+            self.assertEqual(install.helper_notice(), "")
+        self.helper.unlink()
+        self.assertNotIn("administrator helper", self.output())
 
 
 if __name__ == "__main__": unittest.main()

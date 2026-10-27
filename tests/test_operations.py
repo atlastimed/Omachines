@@ -139,8 +139,13 @@ marks=Path(%r)
 if sys.argv[1:2]==['backups']:
     print(json.dumps([{'id':'omarchy-20261026T205001Z','verified':True,'createdAt':'2026-10-26T20:50:01Z'}]))
     raise SystemExit
+(marks/'session').write_text(str(os.getsid(0))+' '+str(os.getppid()))
 (marks/'started').write_text(str(os.getpid()))
-while not (marks/'release').exists():time.sleep(0.02)
+# Never outlive the test: give up when its folder goes or after a minute.
+deadline=time.monotonic()+60
+while not (marks/'release').exists():
+    if not marks.is_dir() or time.monotonic()>deadline:raise SystemExit(1)
+    time.sleep(0.02)
 for _ in range(3):print('Backup omarchy-20261027T000000Z saved and verified',flush=True)
 (marks/'done').write_text(' '.join(sys.argv[1:]))
 """
@@ -214,6 +219,19 @@ class ProviderLifetimeTests(unittest.TestCase):
                 self.assertTrue((self.marks/"done").exists())
                 self.assertEqual(core.operation()["status"], "complete")
                 self.assertFalse(core.busy())
+
+    def test_provider_runs_in_its_own_session(self):
+        # The operation terminal's hangup, termination and Ctrl+C reach the
+        # worker's session only; the supervisor and omarchy-vm never see them.
+        for action in self.ACTIONS:
+            with self.subTest(action):
+                worker = self.start(action)
+                session, supervisor = map(int, (self.marks/"session").read_text().split())
+                self.assertNotEqual(session, os.getsid(worker.pid))
+                self.assertEqual(session, supervisor, "the supervisor should lead the provider's new session")
+                self.release()
+                self.assertEqual(worker.wait(timeout=5), 0)
+                self.assertEqual(core.operation()["status"], "complete")
 
     def test_killed_worker_leaves_the_lock_with_its_provider(self):
         for action in self.ACTIONS:
@@ -289,6 +307,32 @@ class BackupTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class ProviderSessionTests(unittest.TestCase):
+    def popen(self):
+        return patch("operations.subprocess.Popen", return_value=Mock(returncode=0, stdout=None))
+
+    def test_only_detached_providers_get_a_new_session(self):
+        with self.popen() as popen, operations.provider(["/usr/bin/true"], detach=True):
+            pass
+        self.assertIs(popen.call_args.kwargs["start_new_session"], True)
+        with self.popen() as popen, operations.provider(["/usr/bin/true"]):
+            pass
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+
+    def test_windows_sudo_providers_keep_the_terminal(self):
+        with self.popen() as popen:
+            operations.vm_priv("up")
+        self.assertEqual(popen.call_args.args[0][0], "sudo")
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        helper = Mock(); helper.is_file.return_value = True; helper.is_symlink.return_value = False
+        helper.stat.return_value = Mock(st_uid=0, st_mode=0o100755)
+        with self.popen() as popen, patch("operations.Path", return_value=helper):
+            popen.return_value.stdout = io.StringIO("Done\n")
+            operations.admin_action("verify", {"backupId": "omachines-20260101T000000Z-abcdef"})
+        self.assertEqual(popen.call_args.args[0][0], "sudo")
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
 
 
 class SupervisorTests(unittest.TestCase):

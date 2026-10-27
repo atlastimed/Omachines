@@ -66,13 +66,18 @@ def say(text="", end="\n"):
 
 
 @contextmanager
-def provider(argv, **kwargs):
+def provider(argv, detach=False, **kwargs):
     # A worker's provider runs under supervise.py, which inherits the locked
     # operation.lock and outlives a worker that dies early. The lock is thus
-    # released only when the provider has finished.
+    # released only when the provider has finished. A detached provider runs
+    # in its own session: the operation terminal's hangup, termination and
+    # Ctrl+C reach only the worker. sudo needs that terminal for its password,
+    # so Windows providers stay attached.
     if held is not None:
         argv = ["/usr/bin/python3", "-I", "-B", str(ROOT/"backend/supervise.py"), *argv]
         kwargs["pass_fds"] = (held.fileno(),)
+    if detach:
+        kwargs["start_new_session"] = True
     p = subprocess.Popen(argv, **kwargs)
     try:
         yield p
@@ -140,6 +145,21 @@ def vm_priv(action):
         pass
     if result.returncode:
         raise OperationError("VM operation failed or authentication was cancelled")
+
+
+def ensure_memory():
+    # Refuse before starting Windows when the host has less memory free than
+    # its configured RAM (8 GiB when unknown). Not needed once it is running.
+    if windows_reachability({})[0] in ("running","starting"):
+        return
+    import machines
+    allocation=machines.admin_state().get("allocation")
+    ram=re.fullmatch(r"([1-9][0-9]{0,3})G",str(allocation.get("ram","") if isinstance(allocation,dict) else ""))
+    need=int(ram[1]) if ram else 8
+    free=machines.host_resources()["availableBytes"]
+    if free and free<need*1024**3:
+        raise OperationError(f"Only {int(free*10/1024**3)/10:g} GiB of memory is free; Windows needs {need} GiB. "
+                             "Shut down the other VM or close apps first.")
 
 
 def write_diagnostics(config, machine_id=None):
@@ -277,6 +297,7 @@ def attach_windows_storage():
     # its identity and refuses a wrong one.
     if not anchor.parent.is_dir() or str(anchor) in mount_points() or windows_reachability({})[0] in ("running","starting"):
         return False
+    ensure_memory()
     say("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
     say("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
     say("down cleanly, then back it up. Windows stays stopped afterwards. sudo may ask for your")
@@ -323,9 +344,11 @@ def perform(action, config, parameters=None, machine=None):
         launcher=wrapper("windows-vm-launch")
         if not launcher:
             raise OperationError("Windows viewer wrapper is missing")
+        ensure_memory()
         subprocess.Popen([launcher],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return "Windows viewer requested"
     if action=="start":
+        ensure_memory()
         vm_priv("up")
         return "Windows started; connections may take a moment"
     if action=="stop":

@@ -65,13 +65,13 @@ class RegistryTests(Base):
         self.registry.write_text(json.dumps({"schemaVersion": 1, "selected": "windows", "machines": [machine]}))
         return machine
 
-    def test_v1_migration_keeps_windows_entry_and_original_file(self):
-        old = self.v1(name="My Windows", note="kept")
+    def test_v1_migration_keeps_windows_name_and_original_file(self):
+        self.v1(name="My Windows", note="dropped")
         original = self.registry.read_text()
         data = machines.initialize()
         self.assertEqual(data["schemaVersion"], 2)
         self.assertEqual(data["selected"], "windows")
-        self.assertEqual(data["machines"][0], old)
+        self.assertEqual(data["machines"][0], {**machines.windows_machine(), "name": "My Windows"})
         self.assertEqual(data["machines"][1], machines.omarchy_machine())
         self.assertEqual(json.loads(self.registry.read_text()), data)
         self.assertEqual(json.loads((core.state_dir()/"machines-v1.json").read_text()), json.loads(original))
@@ -88,12 +88,11 @@ class RegistryTests(Base):
         self.registry.write_text(json.dumps({"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine()]}))
         self.assertEqual(machines.load()["machines"][1]["id"], "omarchy")
 
-    def test_custom_paths_and_unknown_shapes_fail_closed_and_preserve_file(self):
-        bad_omarchy = {**machines.omarchy_machine(), "connections": {**machines.omarchy_machine()["connections"], "control": "/tmp/other"}}
+    def test_unknown_providers_and_shapes_fail_closed_and_preserve_file(self):
         cases = [
-            {"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine(), bad_omarchy]},
-            {"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine(), {**machines.omarchy_machine(), "sshPort": 22}]},
             {"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine(), machines.windows_machine()]},
+            {"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine(), {**machines.omarchy_machine(), "provider": ["omarchy-qemu"]}]},
+            {"schemaVersion": 2, "selected": "windows", "machines": [machines.windows_machine(), {**machines.omarchy_machine(), "id": "omarchy-2"}]},
             {"schemaVersion": 2, "selected": "other", "machines": [machines.windows_machine()]},
             {"schemaVersion": 2, "selected": "windows", "machines": [{**machines.omarchy_machine(), "id": "windows"}]},
             {"schemaVersion": 2, "selected": "omarchy", "machines": [{**machines.omarchy_machine(), "provider": "qemu-anything"}]},
@@ -107,6 +106,45 @@ class RegistryTests(Base):
                 self.assertEqual(json.loads(self.registry.read_text()), value)
                 with patch("core.tcp", side_effect=AssertionError("no probes")):
                     self.assertEqual(core.collect(core.settings())["state"], "unknown")
+
+    def stored(self, selected, windows, omarchy):
+        value = {"schemaVersion": 2, "selected": selected, "machines": [windows, omarchy]}
+        self.registry.write_text(json.dumps(value))
+        return value
+
+    def test_stored_fixed_fields_are_replaced_by_definitions_and_selection_kept(self):
+        # v0.3.0 stored Omarchy with a host SSH port; its SSH now uses vsock.
+        old_omarchy = {**machines.omarchy_machine(), "host": "127.0.0.1", "sshPort": 2223}
+        self.stored("omarchy", machines.windows_machine(), old_omarchy)
+        data = machines.load()
+        self.assertEqual(data, {"schemaVersion": 2, "selected": "omarchy",
+                                "machines": [machines.windows_machine(), machines.omarchy_machine()]})
+        self.assertNotIn("sshPort", data["machines"][1]); self.assertNotIn("host", data["machines"][1])
+        self.assertEqual(json.loads(self.registry.read_text()), data)
+        self.assertEqual(machines.selected()["id"], "omarchy")
+
+    def test_tampered_connections_are_never_used(self):
+        windows = machines.windows_machine()
+        tampered = {**windows, "consolePort": 9, "connections": {**windows["connections"], "ssh": "/tmp/evil-ssh"}}
+        omarchy = {**machines.omarchy_machine(), "connections": {**machines.omarchy_machine()["connections"], "control": "/tmp/evil-vm"}}
+        self.stored("windows", tampered, omarchy)
+        self.assertEqual(machines.get("windows"), windows)
+        self.assertEqual(machines.get("omarchy")["connections"], machines.omarchy_machine()["connections"])
+        self.assertNotIn("evil", self.registry.read_text())
+        self.assertEqual(json.loads(self.registry.read_text())["selected"], "windows")
+        with patch("omarchy.run", side_effect=fake_run()) as run:
+            core.collect(core.settings(), deep=True, machine_id="omarchy")
+        self.assertTrue(run.call_args_list)
+        self.assertTrue(all("evil" not in c.args[0][0] for c in run.call_args_list))
+
+    def test_invalid_name_falls_back_and_migration_never_overwrites_newer_file(self):
+        self.stored("windows", {**machines.windows_machine(), "name": "bad\nname"}, machines.omarchy_machine())
+        self.assertEqual(machines.load()["machines"][0]["name"], "Windows 11")
+        # A migration computed from an older read is dropped: a selection made
+        # meanwhile is never overwritten.
+        current = self.stored("omarchy", machines.windows_machine(), machines.omarchy_machine())
+        machines.save({**current, "selected": "windows"}, expected={"schemaVersion": 2, "selected": "windows", "machines": []})
+        self.assertEqual(json.loads(self.registry.read_text()), current)
 
     def test_selection_persists_and_requires_installed_control(self):
         machines.initialize()
@@ -134,11 +172,45 @@ class OmarchyStatusTests(Base):
     def test_status_parsing_keeps_only_known_fields(self):
         parsed = omarchy.parse_status({**STATUS, "installMedia": "/home/example/private.iso", "guest": "running; rm", "extra": 1})
         self.assertEqual(parsed, {"running": True, "guest": None, "sshReady": True, "viewerOpen": False,
-                                  "installMedia": True, "diskUsedBytes": 10457452544})
+                                  "installMedia": True, "diskUsedBytes": 10457452544, "unitState": None, "maintenance": None})
         stopped = omarchy.parse_status({"running": False, "guest": None, "sshReady": True, "diskUsedBytes": True})
         self.assertFalse(stopped["sshReady"]); self.assertIsNone(stopped["diskUsedBytes"])
         for value in (None, [], "running", {"running": "yes"}, {}):
             with self.assertRaises(ValueError): omarchy.parse_status(value)
+
+    def test_unit_state_and_maintenance_are_validated(self):
+        parsed = omarchy.parse_status({**STATUS, "unitState": "deactivating", "maintenance": "backup"})
+        self.assertEqual((parsed["unitState"], parsed["maintenance"]), ("deactivating", "backup"))
+        for name in ("backup", "restore", "resources", "create", "stop"):
+            self.assertEqual(omarchy.parse_status({**STATUS, "maintenance": name})["maintenance"], name)
+        for unit, maintenance in (("rebooting", "upgrade"), ("", ""), (["failed"], ["backup"]), (1, {"backup": 1}), (None, None)):
+            with self.subTest(unit=unit, maintenance=maintenance):
+                parsed = omarchy.parse_status({**STATUS, "unitState": unit, "maintenance": maintenance})
+                self.assertEqual((parsed["unitState"], parsed["maintenance"]), (None, None))
+
+    def test_unit_state_classification(self):
+        p = omarchy.parse_status
+        self.assertEqual(omarchy.classify(p({**STATUS, "unitState": "deactivating"}), {}), ("stopping", "Omarchy VM is shutting down"))
+        self.assertEqual(omarchy.classify(p({"running": False, "unitState": "failed"}), {}),
+                         ("stopped", "Omarchy VM stopped unexpectedly; check journalctl --user -u omarchy-vm"))
+        self.assertEqual(omarchy.classify(p({"running": False, "unitState": "inactive"}), {}), ("stopped", "Omarchy VM is stopped"))
+        self.assertEqual(omarchy.classify(p({"running": True, "guest": "unreachable", "unitState": "activating"}), {}),
+                         ("starting", "Omarchy VM is starting"))
+        self.assertEqual(omarchy.classify(p({**STATUS, "unitState": "active"}), {})[0], "running")
+        # Model.js knows each state the provider reports.
+        model = (ROOT/"Model.js").read_text()
+        for state in ("running", "starting", "paused", "stopping", "error"):
+            self.assertIn(state + ':"', model)
+
+    def test_outside_maintenance_is_named_unless_ours(self):
+        p = omarchy.parse_status
+        st = p({"running": False, "unitState": "inactive", "maintenance": "backup"})
+        self.assertEqual(omarchy.classify(st, {}), ("stopped", "Backup in progress outside the panel"))
+        self.assertEqual(omarchy.classify(p({**STATUS, "maintenance": "resources"}), {})[1], "Resource change in progress outside the panel")
+        ours = {"action": "backup", "status": "running", "machineId": "omarchy"}
+        self.assertEqual(omarchy.classify(st, ours)[1], "Backup in progress")
+        self.assertEqual(omarchy.classify(st, {**ours, "machineId": "windows"})[1], "Backup in progress outside the panel")
+        self.assertEqual(omarchy.classify(st, {**ours, "status": "complete"})[1], "Backup in progress outside the panel")
 
     def test_classification(self):
         p = omarchy.parse_status
@@ -226,6 +298,27 @@ class OmarchyStatusTests(Base):
         self.assertEqual(calls, [["status", "--json"]])
         self.assertEqual(state["checks"], previous["checks"]); self.assertEqual(state["backups"], previous["backups"])
         self.assertEqual(state["summary"], "Omarchy VM is ready")
+
+    def test_outside_maintenance_disables_checks_without_probes(self):
+        for status in ({**STATUS, "maintenance": "stop", "unitState": "active"},
+                       {"running": False, "unitState": "inactive", "maintenance": "restore"}):
+            with self.subTest(status=status):
+                state, cua = self.collect(status=status, probe=AssertionError("no guest probe"))
+                self.assertEqual(state["maintenance"], status["maintenance"])
+                self.assertTrue(state["summary"].endswith("in progress outside the panel"))
+                self.assertEqual({c["message"] for c in state["checks"].values()}, {"Unavailable during this operation"})
+                cua.assert_not_called()
+        operations.record("restore", "running", "Restoring", machineId="omarchy")
+        with patch("core.operation_locked", return_value=True):
+            ours, _ = self.collect(status={"running": False, "maintenance": "restore"})
+        self.assertIsNone(ours["maintenance"]); self.assertEqual(ours["summary"], "Restore in progress")
+
+    def test_checks_are_due_again_when_outside_maintenance_ends(self):
+        during, _ = self.collect(status={**STATUS, "maintenance": "create"}, probe=AssertionError("no guest probe"))
+        after, _ = self.collect(deep=False, previous={**during, "machineId": "omarchy"})
+        self.assertIsNone(after["maintenance"])
+        self.assertEqual({c["status"] for c in after["checks"].values()}, {"unknown"})
+        self.assertIn("checks are due", after["summary"])
 
     def test_local_labels_override_manifest_and_ignore_bad_ids(self):
         core.write_json(core.state_dir()/"labels.json", {"omarchy": {"omarchy-20261026T205001Z": "Mine", "../x": "bad"}})
@@ -348,6 +441,34 @@ class DaemonTests(Base):
         self.assertFalse(self.ctl.regained({**lost, "state": "unknown"}, back))
         self.assertFalse(self.ctl.regained({**lost, "machineId": "omarchy"}, back))
 
+    def test_outside_maintenance_ending_counts_as_regained(self):
+        during = {"state": "running", "maintenance": "resources", "machineId": "omarchy"}
+        after = {"state": "running", "maintenance": None, "machineId": "omarchy"}
+        self.assertTrue(self.ctl.regained(during, after))
+        self.assertFalse(self.ctl.regained(after, after))
+        self.assertFalse(self.ctl.regained({**during, "state": "stopped"}, during))
+
+    def test_follow_up_checks_while_the_guest_signs_in(self):
+        def snapshot(desktop="signed-out", cua="offline", **extra):
+            return {"state": "running", "operation": {}, "checks": {"desktop": core.check(desktop, ""), "cua": core.check(cua, "")}, **extra}
+        due = self.ctl.follow_up
+        # SSH came back at 100 and a deep check ran then: every 20 s for 5 minutes.
+        self.assertIs(due(snapshot(), 100, 100, 110), False)
+        self.assertIs(due(snapshot(), 100, 100, 120), True)
+        self.assertIs(due(snapshot("available", "error"), 100, 380, 400), True)
+        self.assertIs(due(snapshot(), 100, 380, 401), None)
+        # Settled: both ready, or Cua not configured.
+        self.assertIs(due(snapshot("available", "ready"), 100, 100, 140), None)
+        self.assertIs(due(snapshot("available", "missing"), 100, 100, 140), None)
+        # Never during an operation; nothing to follow without a return of SSH.
+        for status in ("starting", "running"):
+            self.assertIs(due(snapshot(operation={"status": status}), 100, 100, 140), False)
+        self.assertIs(due(snapshot(operation={"status": "complete"}), 100, 100, 140), True)
+        self.assertIs(due(snapshot(), None, 0, 140), None)
+        self.assertIs(due(snapshot(state="stopped"), 100, 100, 140), None)
+        self.assertIs(due(snapshot(maintenance="backup"), 100, 100, 140), None)
+        self.assertIs(due({"state": "running", "operation": {}, "checks": {}}, 100, 100, 140), True)
+
 
 class OperationTests(Base):
     def setUp(self):
@@ -436,6 +557,67 @@ class OperationTests(Base):
             with self.assertRaisesRegex(core.OperationError, "could not be confirmed"):
                 omarchy.perform("backup", self.config, {}, machine)
 
+    def perform(self, action, lines, code=0, parameters=None):
+        seen, real = [], operations.record
+        with patch("omarchy.subprocess.Popen", return_value=self.stream(lines, code)) as popen, patch("omarchy.run", side_effect=fake_run()), \
+                patch("operations.record", side_effect=lambda *a, **k: (seen.append(a[2]), real(*a, **k))[1]), \
+                patch("builtins.input", return_value="RESTORE omarchy-20261026T205001Z"):
+            try:
+                return omarchy.perform(action, self.config, parameters or {}, machines.omarchy_machine()), seen, popen
+            except core.OperationError as error:
+                return error, seen, popen
+
+    def test_provider_runs_detached_from_the_operation_terminal(self):
+        for action, parameters in (("start", {}), ("stop", {}), ("backup", {}), ("restore", {"backupId": "omarchy-20261026T205001Z"})):
+            with self.subTest(action=action):
+                _, _, popen = self.perform(action, ["Backup omarchy-20261027T101010Z saved and verified\n"], parameters=parameters)
+                self.assertIs(popen.call_args.kwargs["start_new_session"], True)
+                self.assertEqual(popen.call_args.kwargs["stdin"], omarchy.subprocess.DEVNULL)
+
+    def test_forced_stop_is_reported(self):
+        clean, _, _ = self.perform("stop", ["Omarchy VM is stopped\n"])
+        self.assertEqual(clean, "Omarchy VM shut down")
+        forced, _, _ = self.perform("stop", ["Shutting down the Omarchy VM...\n", "Forced off: the guest did not shut down cleanly\n",
+                                             "Omarchy VM is stopped\n"])
+        self.assertEqual(forced, "Omarchy VM was forced off; it did not shut down cleanly")
+
+    def test_forced_backup_and_backup_that_did_not_restart(self):
+        saved = "Backup omarchy-20261027T101010Z saved and verified"
+        forced, _, _ = self.perform("backup", ["Forced off: the guest did not shut down cleanly\n", "OMACHINES_STAGE:copying\n",
+                                               "OMACHINES_STAGE:starting\n", saved + "\n"])
+        self.assertEqual(forced, saved + " (the VM had to be forced off first); Omarchy VM is starting again")
+        failed, _, _ = self.perform("backup", [saved + "\n", "omarchy-vm: backup saved, but the VM did not start again: only 3 GiB of "
+                                               "memory is free; Omarchy VM needs 8 GiB. Shut down the other VM or close apps first\n"], 1)
+        self.assertIsInstance(failed, core.OperationError)
+        self.assertEqual(str(failed), saved + ", but Omarchy VM did not start again: only 3 GiB of memory is free; "
+                                              "Omarchy VM needs 8 GiB. Shut down the other VM or close apps first")
+        hidden, _, _ = self.perform("backup", [saved + "\n", "omarchy-vm: backup saved, but the VM did not start again: /dev/kvm busy\n"], 1)
+        self.assertEqual(str(hidden), saved + ", but Omarchy VM did not start again: no reason was reported")
+        # Without the saved line, nothing claims a backup.
+        refused, _, _ = self.perform("backup", ["omarchy-vm: maintenance in progress (restore); try again when it finishes\n"], 1)
+        self.assertEqual(str(refused), "Maintenance in progress (restore); try again when it finishes")
+
+    def test_restore_that_did_not_restart_names_the_restored_backup(self):
+        name = "omarchy-20261026T205001Z"
+        lines = ["Verifying the backup...\n", "OMACHINES_STAGE:restored\n", "omarchy-vm: restored, but the VM did not start again: QEMU exited\n"]
+        failed, seen, _ = self.perform("restore", lines, 1, {"backupId": name})
+        self.assertIn("Backup restored", seen)
+        self.assertEqual(str(failed), "Omarchy VM was restored from " + name + " but did not start: QEMU exited. The previous disk was kept aside")
+        # Failing before the disks were swapped keeps the current disk.
+        early, seen, _ = self.perform("restore", ["omarchy-vm: backup checksum does not match\n"], 1, {"backupId": name})
+        self.assertEqual(str(early), "Backup checksum does not match"); self.assertNotIn("Backup restored", seen)
+        done, _, _ = self.perform("restore", ["OMACHINES_STAGE:restored\n"], 0, {"backupId": name})
+        self.assertEqual(done, "Omarchy VM restored from " + name + "; the previous disk was kept aside")
+
+    def test_lock_and_memory_refusals_are_shown(self):
+        for line, expected in (("omarchy-vm: maintenance in progress (backup); try again when it finishes",
+                                "Maintenance in progress (backup); try again when it finishes"),
+                               ("omarchy-vm: only 3 GiB of memory is free; Omarchy VM needs 8 GiB. Shut down the other VM or close apps first",
+                                "Only 3 GiB of memory is free; Omarchy VM needs 8 GiB. Shut down the other VM or close apps first")):
+            for action in ("start", "open"):
+                with self.subTest(action=action, line=line), patch("omarchy.hypr_windows", return_value=[]):
+                    self.assertEqual(str(self.perform(action, [line + "\n"], 1)[0]), expected)
+
     def test_restore_requires_typed_identity(self):
         machine = machines.omarchy_machine()
         name = "omarchy-20261026T205001Z"
@@ -483,6 +665,53 @@ class OperationTests(Base):
             self.assertIn(value, text)
 
 
+class WindowsMemoryTests(Base):
+    """Windows starts only when the host has its configured RAM free."""
+
+    def setUp(self):
+        super().setUp()
+        self.meminfo = self.path/"meminfo"
+        self.patch(patch("machines.MEMINFO", self.meminfo))
+        self.allocation = {"allocation": {"cpu": 4, "ram": "8G"}}
+        self.patch(patch("machines.admin_state", side_effect=lambda: self.allocation))
+        self.reachable = self.patch(patch("operations.windows_reachability", return_value=("unreachable", "Windows is not reachable")))
+        self.priv = self.patch(patch("operations.vm_priv"))
+        self.launch = self.patch(patch("operations.subprocess.Popen"))
+        self.patch(patch("operations.viewer_windows", return_value=[]))
+        self.patch(patch("operations.wrapper", side_effect=lambda name: "/fixture/" + name))
+
+    def free(self, gib):
+        self.meminfo.write_text("MemTotal:       32000000 kB\nMemFree:  100 kB\nMemAvailable:   %d kB\n" % int(gib*1024**2))
+
+    def perform(self, action):
+        return operations.perform(action, {"demo": False}, {}, machines.windows_machine())
+
+    def test_start_refused_below_configured_ram(self):
+        self.free(7.95)
+        with self.assertRaises(core.OperationError) as refused: self.perform("start")
+        self.assertEqual(str(refused.exception), "Only 7.9 GiB of memory is free; Windows needs 8 GiB. Shut down the other VM or close apps first.")
+        self.priv.assert_not_called()
+        self.free(8)
+        self.perform("start"); self.priv.assert_called_once_with("up")
+
+    def test_configured_ram_or_eight_gib(self):
+        self.allocation = {"allocation": {"cpu": 4, "ram": "16G"}}; self.free(12)
+        with self.assertRaisesRegex(core.OperationError, "^Only 12 GiB of memory is free; Windows needs 16 GiB"): self.perform("start")
+        for unknown in ({}, {"allocation": "8G"}, {"allocation": {"ram": "unknown"}}):
+            with self.subTest(state=unknown):
+                self.allocation = unknown; self.free(6)
+                with self.assertRaisesRegex(core.OperationError, "Windows needs 8 GiB"): self.perform("start")
+        self.priv.assert_not_called()
+
+    def test_open_checks_memory_only_when_windows_is_stopped(self):
+        self.free(2)
+        with self.assertRaisesRegex(core.OperationError, "^Only 2 GiB"): self.perform("open")
+        self.launch.assert_not_called()
+        self.reachable.return_value = ("running", "Windows is reachable")
+        self.assertEqual(self.perform("open"), "Windows viewer requested")
+        self.assertEqual(self.launch.call_args.args[0], ["/fixture/windows-vm-launch"])
+
+
 class WindowsAnchorTests(Base):
     """After a host restart the protected storage bind is missing until __priv up."""
 
@@ -505,6 +734,7 @@ class WindowsAnchorTests(Base):
         self.ready = self.patch(patch("operations.wait_windows_ready", return_value=True))
         self.admin = self.patch(patch("operations.admin_action", side_effect=lambda *a: self.events.append("admin") or "Complete backup saved and verified"))
         self.patch(patch("operations.windows_reachability", return_value=("unreachable", "Windows is not reachable")))
+        self.memory = self.patch(patch("operations.ensure_memory"))
         helper = Mock(); helper.is_file.return_value = True
         real = Path
         self.patch(patch("operations.Path", side_effect=lambda *a: helper if a == ("/usr/local/lib/omachines/admin.py",) else real(*a)))
@@ -548,6 +778,11 @@ class WindowsAnchorTests(Base):
         with self.assertRaisesRegex(core.OperationError, "still not attached"): self.backup()
         self.assertEqual(self.events, ["up", "down"])
         self.ready.assert_not_called()
+
+    def test_short_memory_refuses_before_starting_windows(self):
+        self.memory.side_effect = core.OperationError("Only 2 GiB of memory is free")
+        with self.assertRaisesRegex(core.OperationError, "Only 2 GiB"): self.backup()
+        self.assertEqual(self.events, [])
 
     def test_cancelled_authorization_changes_nothing(self):
         self.priv.side_effect = core.OperationError("VM operation failed or authentication was cancelled")
