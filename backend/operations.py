@@ -28,6 +28,7 @@ OMARCHY_TERMINAL = {"restore"}
 BACKUP_IDS = {"omarchy-windows": r"(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?",
               "omarchy-qemu": r"omarchy-\d{8}T\d{6}Z"}
 held = None      # this worker's locked operation.lock
+OPEN_WAIT = 600  # seconds a Windows open may wait for authorization and startup
 stopping = []    # termination signals deferred until the outcome is recorded
 
 
@@ -145,6 +146,36 @@ def vm_priv(action):
         pass
     if result.returncode:
         raise OperationError("VM operation failed or authentication was cancelled")
+
+
+def open_windows(launcher):
+    # The launcher can wait at an authorization prompt before it starts
+    # Windows. Until its viewer appears this request owns the lifecycle and
+    # keeps the lock, so a later shutdown or backup cannot be overtaken by an
+    # old prompt approved afterwards. The viewer then runs on its own.
+    argv,kwargs=[launcher],{"stdin":subprocess.DEVNULL,"stdout":subprocess.DEVNULL,"stderr":subprocess.DEVNULL,
+                            "start_new_session":True}
+    if held is not None:
+        argv=["/usr/bin/python3","-I","-B",str(ROOT/"backend/supervise.py"),"--until-released",launcher]
+        kwargs["pass_fds"]=(held.fileno(),)
+    record("open","running","Starting Windows; approve the authorization prompt if one appears")
+    p=subprocess.Popen(argv,**kwargs)
+    deadline=time.monotonic()+OPEN_WAIT
+    while p.poll() is None:
+        if viewer_windows():
+            if held is not None:
+                p.send_signal(signal.SIGUSR1);p.wait()
+            return "Windows viewer opened"
+        if time.monotonic()>deadline:
+            # Withdraw the request, including a prompt nobody answered.
+            try:os.killpg(p.pid,signal.SIGTERM)
+            except ProcessLookupError:pass
+            p.wait()
+            raise OperationError("Windows did not start within 10 minutes; the request was withdrawn")
+        time.sleep(0.5)
+    if p.returncode:
+        raise OperationError("Windows did not start, or authorization was cancelled")
+    return "Windows viewer closed"
 
 
 def ensure_memory():
@@ -345,8 +376,7 @@ def perform(action, config, parameters=None, machine=None):
         if not launcher:
             raise OperationError("Windows viewer wrapper is missing")
         ensure_memory()
-        subprocess.Popen([launcher],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-        return "Windows viewer requested"
+        return open_windows(launcher)
     if action=="start":
         ensure_memory()
         vm_priv("up")

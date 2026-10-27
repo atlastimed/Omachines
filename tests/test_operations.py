@@ -335,6 +335,99 @@ class ProviderSessionTests(unittest.TestCase):
         self.assertNotIn("start_new_session", popen.call_args.kwargs)
 
 
+# A fake windows-vm-launch: it waits (like an authorization prompt), then
+# either opens its "viewer" or exits with the requested status, and records
+# whether it ever got to start Windows.
+FAKE_LAUNCHER = """#!/usr/bin/python3
+import sys,time
+from pathlib import Path
+marks=Path(%r)
+(marks/'started').touch()
+deadline=time.monotonic()+60
+while not (marks/'approve').exists():
+    if not marks.is_dir() or time.monotonic()>deadline:raise SystemExit(1)
+    time.sleep(0.02)
+code=int((marks/'approve').read_text() or 0)
+if code:raise SystemExit(code)
+(marks/'windows-started').touch()
+(marks/'viewer').touch()
+while not (marks/'close').exists() and marks.is_dir() and time.monotonic()<deadline:time.sleep(0.02)
+(marks/'closed').touch()
+"""
+
+
+class WindowsOpenTests(unittest.TestCase):
+    # The real worker and supervisor: an open request keeps the operation lock
+    # until its viewer is up, so an old authorization prompt approved later
+    # can never start Windows after another operation.
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name); self.marks = root/"marks"; self.marks.mkdir()
+        p = patch.dict(os.environ, {"XDG_STATE_HOME": str(root/"state")}); p.start(); self.addCleanup(p.stop)
+        launcher = root/"windows-vm-launch"; launcher.write_text(FAKE_LAUNCHER % str(self.marks)); launcher.chmod(0o700)
+        config = {"demo": False, "notify": False, "asideEnabled": False, "pollSeconds": 120, "setupWorkspace": ""}
+        for target, value in (("operations.settings", config), ("operations.wrapper", str(launcher)), ("operations.ensure_memory", None)):
+            p = patch(target, return_value=value); p.start(); self.addCleanup(p.stop)
+        p = patch("operations.viewer_windows", side_effect=lambda: ["0x1"] if (self.marks/"viewer").exists() else []); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: (self.marks/"close").touch())
+        started = time.time()
+        core.write_json(core.state_dir()/"operation.json", {"action":"open","status":"starting","machineId":"windows","requestId":"fixture",
+                        "startedEpoch":started,"expiresEpoch":started+120,"parameters":{}})
+
+    def wait_for(self, condition, timeout=5):
+        deadline = time.monotonic()+timeout
+        while not condition():
+            if time.monotonic() > deadline: return False
+            time.sleep(0.02)
+        return True
+
+    def run_worker(self, while_pending):
+        # The worker installs signal handlers, so it runs on this thread while
+        # another one inspects the pending state and then answers the prompt.
+        seen = {}
+        def inspect():
+            if self.wait_for(lambda: (self.marks/"started").exists()):
+                seen["busy"] = core.busy()
+                try:
+                    with core.maintenance(): seen["maintenance"] = True
+                except core.OperationError:
+                    seen["maintenance"] = False
+                while_pending()
+        helper = threading.Thread(target=inspect); helper.start()
+        with redirect_stdout(io.StringIO()):
+            code = operations.worker("open", "fixture")
+        helper.join(5)
+        return code, seen
+
+    def test_pending_authorization_keeps_the_lock_until_the_viewer_opens(self):
+        code, seen = self.run_worker(lambda: (self.marks/"approve").write_text("0"))
+        self.assertEqual((code, seen), (0, {"busy": True, "maintenance": False}))
+        self.assertEqual(core.operation()["status"], "complete")
+        self.assertEqual(core.operation()["message"], "Windows viewer opened")
+        # The viewer outlives the operation, which no longer holds the lock.
+        self.assertFalse(core.busy())
+        self.assertFalse((self.marks/"closed").exists())
+        (self.marks/"close").touch()
+        self.assertTrue(self.wait_for(lambda: (self.marks/"closed").exists()))
+
+    def test_cancelled_authorization_fails_and_releases_the_lock(self):
+        code, seen = self.run_worker(lambda: (self.marks/"approve").write_text("1"))
+        self.assertEqual((code, seen["busy"]), (1, True))
+        self.assertEqual(core.operation()["status"], "failed")
+        self.assertIn("authorization was cancelled", core.operation()["message"])
+        self.assertFalse(core.busy())
+
+    def test_unanswered_prompt_is_withdrawn_and_cannot_start_windows_later(self):
+        with patch("operations.OPEN_WAIT", 0.5):
+            code, seen = self.run_worker(lambda: None)
+        self.assertEqual((code, seen["busy"]), (1, True))
+        self.assertIn("request was withdrawn", core.operation()["message"])
+        self.assertFalse(core.busy())
+        (self.marks/"approve").write_text("0")
+        time.sleep(0.3)
+        self.assertFalse((self.marks/"windows-started").exists(), "a withdrawn request started Windows")
+
+
 class SupervisorTests(unittest.TestCase):
     def supervise(self, code, **kwargs):
         return subprocess.run([sys.executable, "-I", "-B", str(BACKEND/"supervise.py"), sys.executable, "-c", code],
@@ -343,6 +436,24 @@ class SupervisorTests(unittest.TestCase):
     def test_provider_exit_status_is_reported(self):
         self.assertEqual(self.supervise("raise SystemExit(3)", capture_output=True).returncode, 3)
         self.assertEqual(self.supervise("import os,signal; os.kill(os.getpid(),signal.SIGTERM)").returncode, 128+signal.SIGTERM)
+
+    def test_release_leaves_the_provider_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mark = Path(tmp)/"alive"
+            code = "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); p.touch(); time.sleep(1); p.write_text('done')"
+            supervisor = subprocess.Popen([sys.executable, "-I", "-B", str(BACKEND/"supervise.py"), "--until-released",
+                                           sys.executable, "-c", code, str(mark)])
+            deadline = time.monotonic()+5
+            while not mark.exists() and time.monotonic() < deadline: time.sleep(0.02)
+            supervisor.send_signal(signal.SIGUSR1)
+            self.assertEqual(supervisor.wait(timeout=5), 0)
+            self.assertEqual(mark.read_text(), "")
+            deadline = time.monotonic()+5
+            while mark.read_text() != "done" and time.monotonic() < deadline: time.sleep(0.05)
+            self.assertEqual(mark.read_text(), "done")
+        # Without a release it reports the provider's own exit status.
+        self.assertEqual(subprocess.run([sys.executable, "-I", "-B", str(BACKEND/"supervise.py"), "--until-released",
+                                         sys.executable, "-c", "raise SystemExit(4)"], timeout=10).returncode, 4)
 
     def test_terminal_output_is_left_to_the_provider(self):
         import pty

@@ -13,7 +13,10 @@ already be configured. A VM creation wizard and arbitrary providers are future w
 Click **VM** on the bar. The label adds a logo for each running VM (the Windows
 logo, or the Arch logo for the Omarchy VM) and the tooltip lists every machine.
 Right-click opens or focuses the selected machine; middle-click checks connections.
-Closing a viewer keeps its VM running.
+Closing a viewer keeps its VM running. Opening Windows counts as an operation until
+its viewer appears: approve or cancel the authorization prompt. A prompt left
+unanswered for 10 minutes is withdrawn, so it can never start Windows after a later
+shutdown or backup.
 
 When both machines are available, a switcher at the top of the panel selects the
 machine shown; **M** cycles machines. The choice is remembered and shared by every

@@ -1,5 +1,33 @@
 # Review fixes
 
+## 27 October 2026 second pass (v0.3.1)
+
+A fresh five-reviewer pass over `cf7da31` reported four P2 findings, each reproduced
+in an isolated fixture. R1 is in this repository; R2–R4 are in the Omarchy VM tooling
+(`omarchy-vm`), which now has its own tests beside it.
+
+| Finding | Change | Regression evidence |
+| --- | --- | --- |
+| R1: Windows **Open desktop** completed before its startup | The launcher runs under `supervise.py --until-released`, which holds the operation lock until the worker sees the viewer window and releases it; the viewer then runs on its own. A launcher that exits first fails the operation ("authorization was cancelled"); one still waiting after 10 minutes is stopped with its process group and the request is withdrawn. A killed worker leaves the lock with the supervisor until the launcher ends, as for other providers. | Real worker and supervisor with a fake launcher: while authorization is pending, operations and installer maintenance are refused; after the viewer appears the lock is free and the viewer keeps running; cancellation fails cleanly; an unanswered prompt approved after the timeout never starts Windows. Release mode leaves its program running and otherwise reports its exit status. All fail on `cf7da31`. |
+| R2: RAM change stopped the VM before checking it could restart | `omarchy-vm resources` refuses, before saving or stopping anything, a size larger than the memory free plus what the running VM gives back. If the restart still fails, the previous allocation is restored and started, and the command fails saying so. | Growth that cannot fit, growth that fits, reductions, stopped VMs and a restart failure after the check; and live: a 24 GiB request with 12.7 GiB obtainable was refused and the VM kept running. |
+| R3: two plain `create` commands could overwrite a disk | The disk's existence and a stopped VM are checked only while holding the lifecycle lock. | The review's interleaving with real `flock` and `qemu-img`: the delayed create refuses and the disk is unchanged; a running VM is never given a new disk. |
+| R4: CPU writer and reader disagreed above 16 | One rule (`MAX_CPUS`) checks the whole configuration when it is read and before a change is saved; changes accept at most `min(16, host CPUs)`. | A 24-CPU host: 17 refused before anything is written or stopped, 16 accepted, the saved file always readable. |
+
+While adding those tests, one regression from the first system-review commit was
+found and fixed: `omarchy-vm start` had lost its wait for QEMU's monitor (it moved
+into the post-maintenance restart helper), so `start` returned before QEMU answered.
+
+### Verification
+
+`python3 scripts/check.py` passes 192 Python tests, manifest validation, qmllint
+without warnings and 35 native Qt passes; the privacy check is clean. The Omarchy VM
+tooling's 12 tests pass (`python3 -m unittest discover -s tests` in its folder).
+
+### Limits
+
+R1 was tested with a fake launcher; a real Windows authorization prompt was not
+left pending. The R2 restart-failure rollback was tested with fakes only.
+
 ## 27 October 2026 system review (v0.3.1)
 
 A second three-reviewer pass covered the whole system: this plugin, the Omarchy VM

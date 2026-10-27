@@ -708,7 +708,9 @@ class WindowsMemoryTests(Base):
         with self.assertRaisesRegex(core.OperationError, "^Only 2 GiB"): self.perform("open")
         self.launch.assert_not_called()
         self.reachable.return_value = ("running", "Windows is reachable")
-        self.assertEqual(self.perform("open"), "Windows viewer requested")
+        self.launch.return_value.poll.return_value = None
+        with patch("operations.viewer_windows", side_effect=[[], ["0x1"]]):
+            self.assertEqual(self.perform("open"), "Windows viewer opened")
         self.assertEqual(self.launch.call_args.args[0], ["/fixture/windows-vm-launch"])
 
 
