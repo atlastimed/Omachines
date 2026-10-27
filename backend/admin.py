@@ -90,8 +90,10 @@ def atomic(path,data,gid=0):
 
 def copy_image(source,target,gid):
     # The rehearsal container wrote source: never follow a link it left there,
-    # and copy only a plain file of screenshot size.
-    fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW)
+    # and copy only a plain file of screenshot size. Special files are refused
+    # before opening, and the open cannot block (a FIFO waits for a writer).
+    if not stat.S_ISREG(os.lstat(source).st_mode):raise Refused('The rehearsal screen capture is not a plain image file')
+    fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     with os.fdopen(fd,'rb') as f:
         info=os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size>IMAGE_LIMIT:raise Refused('The rehearsal screen capture is not a plain image file')

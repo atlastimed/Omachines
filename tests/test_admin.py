@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import tarfile
 import tempfile
@@ -299,16 +300,23 @@ class RehearsalImageTests(unittest.TestCase):
     def test_link_left_by_the_container_is_not_followed(self):
         secret=self.root/'host-secret';secret.write_text('private')
         (self.root/'capture.ppm').symlink_to(secret)
-        with self.assertRaises(OSError):admin.copy_image(self.root/'capture.ppm',self.target,1000)
+        with self.assertRaises(admin.Refused):admin.copy_image(self.root/'capture.ppm',self.target,1000)
         self.assertFalse(self.target.exists())
 
     def test_oversized_or_special_capture_is_refused(self):
-        os.mkfifo(self.root/'fifo')
         (self.root/'big.ppm').write_bytes(b'12345')
         with patch('admin.IMAGE_LIMIT',4),self.assertRaises(admin.Refused):
             admin.copy_image(self.root/'big.ppm',self.target,1000)
-        fd=os.open(self.root/'fifo',os.O_RDWR)  # keeps the open below from blocking
+        self.assertFalse(self.target.exists())
+
+    def test_fifo_without_a_writer_is_refused_without_blocking(self):
+        # Opening a FIFO for reading waits for a writer; the helper would hang
+        # holding its locks. The alarm turns a hang into a failure.
+        os.mkfifo(self.root/'capture.ppm')
+        def stuck(*_):raise AssertionError('copy_image blocked on a FIFO')
+        old=signal.signal(signal.SIGALRM,stuck);signal.setitimer(signal.ITIMER_REAL,5)
         try:
-            with self.assertRaises(admin.Refused):admin.copy_image(self.root/'fifo',self.target,1000)
-        finally:os.close(fd)
+            with self.assertRaises(admin.Refused):admin.copy_image(self.root/'capture.ppm',self.target,1000)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,old)
         self.assertFalse(self.target.exists())
