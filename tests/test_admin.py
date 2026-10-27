@@ -1,9 +1,11 @@
 """Recovery fixtures never call Docker, sudo, or touch a real VM."""
 from contextlib import nullcontext
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import tarfile
 import tempfile
@@ -67,7 +69,7 @@ class RestoreTests(unittest.TestCase):
         self.clone=self.root/'stage/storage';self.clone.mkdir(parents=True);(self.clone/'data.img').write_text('restored')
         self.p=admin.Provider.__new__(admin.Provider);self.p.storage=self.storage;self.p.anchor=self.root/'anchor';self.p.state={};self.p.save=Mock();self.p.down=Mock();self.p.up=Mock()
         self.p.uid=os.getuid();self.p.gid=os.getgid()
-        self.p.verify=Mock(return_value=(self.root,{},10));self.p.extract=Mock(return_value=self.clone)
+        self.p.verify=Mock(return_value=(self.root,{},10));self.p.room=Mock();self.p.extract=Mock(return_value=self.clone)
         self.name='development-ready-20261016T193430Z'
     def tearDown(self):self.tmp.cleanup()
     def run_restore(self,confirm=None,cmd=None):
@@ -82,6 +84,50 @@ class RestoreTests(unittest.TestCase):
     def test_cancellation_never_stops_original(self):
         with self.assertRaises(admin.Refused):self.run_restore('cancel')
         self.p.down.assert_not_called();self.assertEqual((self.storage/'data.img').read_text(),'original')
+        # Nothing was extracted, so no root-owned copy is left behind.
+        self.p.extract.assert_not_called()
+    def test_end_of_input_cancels_without_extracting(self):
+        with patch('admin.trusted'),patch('builtins.input',side_effect=EOFError):
+            with self.assertRaisesRegex(admin.Refused,'cancelled'):self.p.restore(self.name)
+        self.p.extract.assert_not_called();self.p.down.assert_not_called()
+    def test_space_is_checked_before_asking(self):
+        self.p.room=Mock(side_effect=admin.Refused('Not enough space'))
+        prompt=Mock()
+        with patch('admin.trusted'),patch('builtins.input',prompt):
+            with self.assertRaisesRegex(admin.Refused,'space'):self.p.restore(self.name)
+        prompt.assert_not_called();self.p.extract.assert_not_called()
+    def test_extraction_follows_confirmation_and_precedes_shutdown(self):
+        calls=Mock();calls.attach_mock(self.p.extract,'extract');calls.attach_mock(self.p.down,'down')
+        with patch('admin.trusted'),patch('admin.lifecycle_lock',return_value=nullcontext()),patch('admin.command'),\
+             patch('builtins.input',side_effect=lambda:(calls.confirm(),'RESTORE '+self.name)[1]):
+            self.p.restore(self.name)
+        self.assertEqual([c[0] for c in calls.mock_calls],['confirm','extract','down'])
+    def test_lifecycle_lock_is_taken_after_confirmation_and_before_extraction(self):
+        calls=Mock();calls.attach_mock(self.p.extract,'extract');calls.attach_mock(self.p.down,'down')
+        lock=Mock(return_value=nullcontext());calls.attach_mock(lock,'lock')
+        with patch('admin.trusted'),patch('admin.lifecycle_lock',lock),patch('admin.command'),\
+             patch('builtins.input',side_effect=lambda:(calls.confirm(),'RESTORE '+self.name)[1]):
+            self.p.restore(self.name)
+        self.assertEqual([c[0] for c in calls.mock_calls],['confirm','lock','extract','down'])
+    def held_lock(self):
+        # A real lifecycle lock on a fixture directory, held by another holder.
+        lock=self.root/'lifecycle';lock.mkdir()
+        fd=os.open(lock,os.O_RDONLY|os.O_DIRECTORY);self.addCleanup(os.close,fd)
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return patch('admin.LOCK',lock)
+    def test_busy_lifecycle_lock_refuses_before_extraction(self):
+        with self.held_lock(),patch('admin.trusted'),patch('admin.command') as cmd,patch('builtins.input',return_value='RESTORE '+self.name):
+            with self.assertRaisesRegex(admin.Refused,'Another Windows lifecycle operation'):self.p.restore(self.name)
+        self.p.extract.assert_not_called();self.p.down.assert_not_called();cmd.assert_not_called()
+        self.assertEqual((self.storage/'data.img').read_text(),'original')
+    def test_failed_shutdown_removes_the_staging_copy_and_keeps_storage(self):
+        self.p.down=Mock(side_effect=admin.Refused('Windows did not stop'))
+        cmd=Mock()
+        with self.assertRaisesRegex(admin.Refused,'did not stop'):self.run_restore(cmd=cmd)
+        self.assertFalse(self.clone.parent.exists())
+        self.assertEqual((self.storage/'data.img').read_text(),'original')
+        self.assertNotIn('recovery',self.p.state);cmd.assert_not_called();self.p.up.assert_not_called()
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),['storage'])
     def test_failed_mount_retains_both_versions_and_does_not_start(self):
         def fail(argv,*a,**kw):
             if argv[0]=='/usr/bin/mount':raise admin.Refused('fixture failure')
@@ -192,7 +238,85 @@ class SparseArchiveTests(unittest.TestCase):
             info=admin.archive_info(archive)
             self.assertLess(info['requiredBytes'],1024**2);self.assertGreater(info['logicalBytes'],1024**3)
             p=admin.Provider.__new__(admin.Provider);p.stage=Mock()
-            with archive.open('rb') as f:clone=p.extract(Path('/proc/self/fd')/str(f.fileno()),root)
+            with archive.open('rb') as f:clone=p.extract(Path('/proc/self/fd')/str(f.fileno()),info,root)
             with (clone/'data.img').open('rb') as f:
                 self.assertEqual(f.read(5),b'begin');f.seek(1024**3);self.assertEqual(f.read(),b'end')
             self.assertEqual((clone/'windows_secure.tpm/state').read_text(),'TPM')
+    def test_extraction_without_storage_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            p=admin.Provider.__new__(admin.Provider);p.stage=Mock();p.room=Mock()
+            with patch('admin.command'),self.assertRaisesRegex(admin.Refused,'no Windows storage'):
+                p.extract(Path('/proc/self/fd/0'),{'requiredBytes':0},Path(temp))
+            self.assertEqual(list(Path(temp).iterdir()),[])
+    def test_failed_tar_or_sync_removes_its_staging_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);parent=root/'parent';parent.mkdir()
+            p=admin.Provider.__new__(admin.Provider);p.stage=Mock();p.room=Mock()
+            # A real tar failure on a damaged archive, after a partial entry was written.
+            damaged=root/'damaged.tar';damaged.write_bytes(b'not an archive\n'*100)
+            real=admin.command
+            def partial(argv,*a,**kw):
+                if argv[0]=='/usr/bin/tar':(Path(argv[argv.index('--directory')+1])/'storage').mkdir()
+                return real(argv,*a,**kw)
+            with damaged.open('rb') as f,patch('admin.command',side_effect=partial),self.assertRaises(admin.Refused):
+                p.extract(Path('/proc/self/fd')/str(f.fileno()),{'requiredBytes':0},parent)
+            self.assertEqual(list(parent.iterdir()),[])
+            def sync_fails(argv,*a,**kw):
+                if argv[0]=='/usr/bin/sync':raise admin.Refused('fixture sync failure')
+                (Path(argv[argv.index('--directory')+1])/'storage').mkdir()
+            with patch('admin.command',side_effect=sync_fails),self.assertRaisesRegex(admin.Refused,'sync'):
+                p.extract(Path('/proc/self/fd/0'),{'requiredBytes':0},parent)
+            self.assertEqual(list(parent.iterdir()),[])
+
+
+class BackupStagingTests(unittest.TestCase):
+    def test_refused_backup_leaves_no_incomplete_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);storage=root/'storage';storage.mkdir();(storage/'data.img').write_text('disk')
+            base=root/'backups';base.mkdir();lock=root/'lifecycle';lock.mkdir()
+            p=admin.Provider.__new__(admin.Provider);p.storage=storage;p.base=base;p.opened=[]
+            p.running=Mock(return_value=True);p.down=Mock();p.up=Mock();p.stage=Mock()
+            fd=os.open(lock,os.O_RDONLY|os.O_DIRECTORY);self.addCleanup(os.close,fd)
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            space=Mock(free=1024*admin.GIB)
+            with patch('admin.LOCK',lock),patch('admin.trusted'),patch('admin.shutil.disk_usage',return_value=space),patch('admin.command') as cmd:
+                with self.assertRaisesRegex(admin.Refused,'Another Windows lifecycle operation'):p.backup()
+            self.assertEqual(list(base.iterdir()),[])
+            p.down.assert_not_called();p.up.assert_not_called();cmd.assert_not_called()
+
+
+class RehearsalImageTests(unittest.TestCase):
+    def setUp(self):
+        tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
+        self.root=Path(tmp.name);self.target=self.root/'rehearsal.ppm'
+        self.chown=patch('admin.os.chown');self.chown.start();self.addCleanup(self.chown.stop)
+
+    def test_plain_capture_is_copied_privately(self):
+        (self.root/'capture.ppm').write_bytes(b'P6 image')
+        admin.copy_image(self.root/'capture.ppm',self.target,1000)
+        self.assertEqual(self.target.read_bytes(),b'P6 image')
+        self.assertEqual(self.target.stat().st_mode&0o777,0o640)
+
+    def test_link_left_by_the_container_is_not_followed(self):
+        secret=self.root/'host-secret';secret.write_text('private')
+        (self.root/'capture.ppm').symlink_to(secret)
+        with self.assertRaises(admin.Refused):admin.copy_image(self.root/'capture.ppm',self.target,1000)
+        self.assertFalse(self.target.exists())
+
+    def test_oversized_or_special_capture_is_refused(self):
+        (self.root/'big.ppm').write_bytes(b'12345')
+        with patch('admin.IMAGE_LIMIT',4),self.assertRaises(admin.Refused):
+            admin.copy_image(self.root/'big.ppm',self.target,1000)
+        self.assertFalse(self.target.exists())
+
+    def test_fifo_without_a_writer_is_refused_without_blocking(self):
+        # Opening a FIFO for reading waits for a writer; the helper would hang
+        # holding its locks. The alarm turns a hang into a failure.
+        os.mkfifo(self.root/'capture.ppm')
+        def stuck(*_):raise AssertionError('copy_image blocked on a FIFO')
+        old=signal.signal(signal.SIGALRM,stuck);signal.setitimer(signal.ITIMER_REAL,5)
+        try:
+            with self.assertRaises(admin.Refused):admin.copy_image(self.root/'capture.ppm',self.target,1000)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL,0);signal.signal(signal.SIGALRM,old)
+        self.assertFalse(self.target.exists())

@@ -112,6 +112,8 @@ class CoreTests(unittest.TestCase):
         runtime=(dest/manifest['entryPoints']['service']).parent
         self.assertEqual((runtime/'Service.qml').read_bytes(),(install.ROOT/'Service.qml').read_bytes())
         self.assertEqual((runtime/'backend/operations.py').read_bytes(),(install.ROOT/'backend/operations.py').read_bytes())
+        # Every worker provider runs under the supervisor.
+        self.assertTrue((runtime/'backend/supervise.py').is_file())
         self.assertFalse(list(dest.rglob('__pycache__')))
         self.assertFalse(list(dest.rglob('.env')))
         second=self.path/'second';second.mkdir();install.stage_release(second)

@@ -22,7 +22,8 @@ import tarfile
 import tempfile
 import time
 
-VERSION="0.3.0"
+VERSION="0.3.1"
+IMAGE_LIMIT=64*1024*1024
 COMPOSE=Path("/var/lib/omarchy/windows/docker-compose.yml")
 HELPER=Path("/usr/local/lib/omachines/admin.py")
 LOCK=Path("/run/lock/omarchy-windows-vm")
@@ -45,6 +46,11 @@ def command(argv, timeout=60, pass_fds=()):
     if p.returncode:
         raise Refused("A system command failed; original data and incomplete work were retained")
     return p.stdout
+
+
+def typed():
+    try:return input().strip()
+    except EOFError:return ''
 
 
 def mounted(path):
@@ -78,6 +84,25 @@ def atomic(path,data,gid=0):
         d=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(d)
         finally: os.close(d)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def copy_image(source,target,gid):
+    # The rehearsal container wrote source: never follow a link it left there,
+    # and copy only a plain file of screenshot size. Special files are refused
+    # before opening, and the open cannot block (a FIFO waits for a writer).
+    if not stat.S_ISREG(os.lstat(source).st_mode):raise Refused('The rehearsal screen capture is not a plain image file')
+    fd=os.open(source,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as f:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size>IMAGE_LIMIT:raise Refused('The rehearsal screen capture is not a plain image file')
+        data=f.read(IMAGE_LIMIT+1)
+    if len(data)>IMAGE_LIMIT:raise Refused('The rehearsal screen capture is not a plain image file')
+    out,name=tempfile.mkstemp(prefix='.omachines-',dir=target.parent)
+    try:
+        with os.fdopen(out,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
+        os.chown(name,0,gid);os.chmod(name,0o640);os.replace(name,target)
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -262,16 +287,17 @@ class Provider:
         name="omachines-"+token();partial=self.base/(name+".incomplete");dest=self.base/name
         needed=sum(p.stat().st_blocks*512 for p in self.storage.rglob('*') if p.is_file())
         if shutil.disk_usage(self.base).free<needed+10*GIB: raise Refused("Not enough backup space; nothing was stopped")
-        partial.mkdir(mode=0o700)
-        partial_fd=os.open(partial,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-        partial_stat=os.fstat(partial_fd)
-        if partial_stat.st_uid!=0 or partial_stat.st_mode&0o077:
-            os.close(partial_fd);raise Refused('Backup staging identity changed')
-        self.opened.append(partial_fd)
-        pinned_partial=Path('/proc/self/fd')/str(partial_fd)
         was_running=False
         try:
             with lifecycle_lock():
+                # Staged only once both locks are held: a refused backup leaves nothing behind.
+                partial.mkdir(mode=0o700)
+                partial_fd=os.open(partial,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                partial_stat=os.fstat(partial_fd)
+                if partial_stat.st_uid!=0 or partial_stat.st_mode&0o077:
+                    os.close(partial_fd);raise Refused('Backup staging identity changed')
+                self.opened.append(partial_fd)
+                pinned_partial=Path('/proc/self/fd')/str(partial_fd)
                 was_running=self.running();self.down()
                 self.stage("copying")
                 command(["/usr/bin/tar","--sparse","--hole-detection=seek","-cpf",str(pinned_partial/"storage.tar"),"-C",str(self.storage.parent),self.storage.name],3600,pass_fds=tuple(self.opened))
@@ -333,16 +359,25 @@ class Provider:
                 raise Refused('New allocation could not start; previous configuration restored and Windows restarted') from None
         return "Allocation updated"+("; Windows started" if was_running else "; applies when Windows starts")
 
-    def extract(self,path,parent):
-        # path is a pinned, verified archive FD. Sparse extents determine the
-        # required allocation; regular archives require their full logical size.
-        info=archive_info(path)
+    def room(self,info,parent):
+        # Sparse extents determine the required allocation; regular archives
+        # require their full logical size.
         if shutil.disk_usage(parent).free<info['requiredBytes']+5*GIB:raise Refused("Not enough space for a safe restore alongside the existing data")
+
+    def extract(self,path,info,parent):
+        # path is a pinned, verified archive FD. A failed extraction removes its
+        # own staging directory: a fresh copy of a backup that still exists.
+        self.room(info,parent)
         stage=Path(tempfile.mkdtemp(prefix='.omachines-restore-',dir=parent));stage.chmod(0o700)
-        self.stage('restoring')
-        command(['/usr/bin/tar','--extract','--sparse','--no-same-owner','--no-same-permissions','--file',str(path),'--directory',str(stage)],3600,pass_fds=(int(path.name),))
-        command(['/usr/bin/sync','-f',str(stage)])
-        return stage/'storage'
+        try:
+            self.stage('restoring')
+            command(['/usr/bin/tar','--extract','--sparse','--no-same-owner','--no-same-permissions','--file',str(path),'--directory',str(stage)],3600,pass_fds=(int(path.name),))
+            command(['/usr/bin/sync','-f',str(stage)])
+            clone=stage/'storage'
+            if clone.is_symlink() or not clone.is_dir():raise Refused('The extracted backup has no Windows storage; nothing was switched')
+        except BaseException:
+            shutil.rmtree(stage,ignore_errors=True);raise
+        return clone
 
     def rehearsal(self,name):
         path,info,fd=self.verify(name)
@@ -351,7 +386,7 @@ class Provider:
         available=memory_info()['MemAvailable']
         if available<6*GIB:raise Refused('Free at least 6 GiB of host RAM before the rehearsal')
         if self.state.get('rehearsal',{}).get('status') in ('starting','awaiting-review'):raise Refused('Finish the previous rehearsal before starting another')
-        clone=self.extract(Path('/proc/self/fd')/str(fd),base)
+        clone=self.extract(Path('/proc/self/fd')/str(fd),info,base)
         container='omachines-rehearsal-'+str(self.uid)
         # No host shares, published ports, privileged mode, tun device or network.
         # The disk/TPM/firmware are disposable copies. The original VM is untouched.
@@ -368,7 +403,7 @@ class Provider:
         # listener on the host and is saved privately for explicit human review.
         code="import socket,json; s=socket.create_connection(('127.0.0.1',7100),5); f=s.makefile('rwb',buffering=0); f.readline(); f.write(b'{\"execute\":\"qmp_capabilities\"}\\n'); f.readline(); f.write(b'{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"/storage/omachines-rehearsal.ppm\"}}\\n'); print(f.readline().decode())"
         command(['/usr/bin/docker','exec',container,'python3','-c',code],15)
-        screenshot=self.root/'rehearsal.ppm';shutil.copyfile(clone/'omachines-rehearsal.ppm',screenshot);os.chown(screenshot,0,self.gid);screenshot.chmod(0o640)
+        screenshot=self.root/'rehearsal.ppm';copy_image(clone/'omachines-rehearsal.ppm',screenshot,self.gid)
         self.state['rehearsal'].update(status='awaiting-review',screenshot=str(screenshot));self.save()
         return 'Offline copy is ready for visual review; use Open rehearsal image, then record the result'
 
@@ -394,13 +429,20 @@ class Provider:
         path,info,fd=self.verify(name)
         trusted(self.storage.parent)
         if self.storage.name!='storage':raise Refused('This recovery provider requires a storage directory below a root-owned parent')
-        clone=self.extract(Path('/proc/self/fd')/str(fd),self.storage.parent)
-        old=self.storage.with_name('storage-before-'+token())
+        # Confirm before extracting: a cancelled restore leaves no copy behind.
+        self.room(info,self.storage.parent)
         print('Type RESTORE '+name+' to replace the Windows disk, TPM and firmware (old data is retained):',flush=True)
-        if input().strip()!='RESTORE '+name:
+        if typed()!='RESTORE '+name:
             raise Refused('Restore cancelled; original Windows data is unchanged')
+        old=self.storage.with_name('storage-before-'+token())
+        # Held from before extraction until the switch: a busy lock refuses
+        # before anything is copied.
         with lifecycle_lock():
-            self.down()
+            clone=self.extract(Path('/proc/self/fd')/str(fd),info,self.storage.parent)
+            try:self.down()
+            except BaseException:
+                # Nothing was switched: remove our own copy of a backup that still exists.
+                shutil.rmtree(clone.parent,ignore_errors=True);raise
             self.state['recovery']={'status':'prepared','original':str(self.storage),'previous':str(old),'staged':str(clone),'backupId':name};self.save()
             command(['/usr/bin/umount',str(self.anchor)])
             try:
@@ -423,7 +465,7 @@ class Provider:
         if r.get('status') not in ('prepared','restored','needs-attention','rollback-switching') or old.parent!=self.storage.parent or not re.fullmatch(r'storage-before-\d{8}T\d{6}Z-[0-9a-f]{6}',old.name) or old.is_symlink() or (not old.is_dir() and not (retry and self.storage.is_dir())):
             raise Refused('No retained storage is eligible for rollback')
         print('Type ROLLBACK WINDOWS to stop Windows and return to its retained storage:',flush=True)
-        if input().strip()!='ROLLBACK WINDOWS':raise Refused('Rollback cancelled')
+        if typed()!='ROLLBACK WINDOWS':raise Refused('Rollback cancelled')
         with lifecycle_lock():
             self.down()
             # Remove every layer; a bind left in place would sit hidden under

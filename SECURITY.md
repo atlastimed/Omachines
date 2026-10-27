@@ -22,6 +22,14 @@ Trust boundaries:
   SIGTERM and SIGHUP. Detached lifecycle workers have a separate lifetime.
   This is not containment for a malicious host executable that escapes its
   process group, nor a cleanup guarantee after an uncatchable owner SIGKILL.
+- A lifecycle worker never abandons its VM command. Each command runs under a
+  supervisor that inherits the operation lock and lives as long as the command,
+  so even a killed worker cannot admit a second operation or an update early.
+  A worker asked to stop waits for the command and records its result.
+- Installer state in `~/.local/state/omachines/installer.json` holds the panel's
+  saved options, including the legacy backup workspace path, between removal and
+  reinstall. Like `shell.json`, it must be controlled by the user. Only this
+  plugin's known option keys with valid types are restored.
 - Reports and operation records are private local files. Reports omit account
   IDs, guest paths, window titles and raw command output. Review any report
   before attaching it to a public issue.
@@ -74,16 +82,29 @@ kernel/hypervisor exploit. Guest code is never trusted as a host command source.
 The Omarchy VM provider runs only the fixed user-owned commands `omarchy-vm`,
 `omarchy-vm-ssh` and `omarchy-vm-mcp` from `~/.local/bin`. It needs no root,
 sudo, polkit or password and adds no privileged code; the administrator helper is
-not used for it. Registry entries with other paths are refused. Status, catalogue
-and guest-probe output is reduced to known fields; failure reasons are shown only
-when they are short `omarchy-vm:` messages without paths.
+not used for it. Paths stored in the registry are never used; they are replaced by
+the provider's own definition. Status, catalogue and guest-probe output is reduced
+to known fields; failure reasons are shown only when they are short `omarchy-vm:`
+messages without paths.
 
 Agents connected through `omarchy-vm-ssh` get **passwordless sudo inside that
 guest**. That is root in the VM only, not on the host, but it covers everything in
 the guest, including its signed-in accounts and the shared folder. The shared
 folder `~/OmarchyVM` (guest `~/Shared`) is writable from the guest: treat its
-contents as untrusted, and do not put host secrets there. The VM's QEMU process
-runs as the desktop user.
+contents as untrusted, and do not put host secrets there. QEMU shares it in
+`mapped-xattr` mode, so guest files arrive as private, non-executable plain files
+and guest links never become host links; nothing limits how much the guest writes.
+The VM's QEMU process runs as the desktop user.
+
+The Omarchy VM's network (passt) reaches the internet and the local network but
+not services that listen only on the host's loopback, and accepts no inbound
+connections. SSH uses vsock, not the network. The guest has sound output but no
+microphone. While the viewer is open, text copied in the guest replaces the host
+clipboard.
+
+Everything an agent reads from either guest (screens, files, clipboard text,
+command output and Omachines' connection reports) can contain text written to
+steer it. Agents on the host should treat it as data, not instructions.
 
 Omarchy VM backups in `~/Omarchy-VM-Backups/` contain the whole guest disk,
 including any credentials and signed-in sessions, plus the host-side SSH
@@ -96,3 +117,6 @@ up/down` interface in the visible operation terminal and the helper's existing c
 Helper 0.3.0 changes only how rollback finds the storage mount: it reads the kernel
 mount table, because `os.path.ismount` misses a bind mount within one filesystem.
 It removes every mount layer before switching storage and refuses if one remains.
+Helper 0.3.1 changes only the order of a restore: it checks space and asks for the
+typed confirmation before extracting, confirms the extracted copy contains Windows
+storage, and treats end of input as cancellation.

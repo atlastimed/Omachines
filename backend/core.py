@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 ID = "atlastimed.omachines"
 
 
@@ -238,8 +238,15 @@ def operation():
         alive = isinstance(pid, int) and pid > 0 and Path(f"/proc/{pid}").exists()
         if value.get("status") == "starting":
             alive = reservation_fresh(value)
+        elif operation_locked():
+            # The lock passes to the provider's supervisor, so it is held
+            # while the work continues even if its worker has stopped.
+            if not alive:
+                value = {**value, "message": "Still running, but Omachines stopped following it; "
+                         "its result will not be reported. Wait for it before retrying."}
+            alive = True
         else:
-            alive = alive and operation_locked()
+            alive = False
         if not alive:
             value = {**value, "status": "interrupted", "message": "Operation interrupted. Check the VM and the operation terminal before retrying."}
     return value
@@ -267,6 +274,16 @@ def fresh_checks(previous, interval):
         return 0 <= age <= max(60, interval * 2)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
+
+
+def carried_checks(previous):
+    # Shallow polls keep the last deep evidence, except evidence from a state
+    # without SSH or during outside maintenance: once SSH answers again it
+    # says nothing until a deep check.
+    checks = dict(previous.get("checks", {}))
+    if previous.get("state") not in ("running", "unknown") or previous.get("maintenance"):
+        checks = {name: check("unknown", "Connection checks are due") for name in checks}
+    return checks
 
 
 def refresh_snapshot(config, previous, deep):
@@ -394,21 +411,30 @@ def collect_windows(config, deep=False, previous=None):
             s["checks"][name]=check("offline","Unavailable during backup" if backup_active else "Start Windows, or check the recovery console")
         return s
     ssh_port = state == "running"
+    if not ssh_port:
+        # Only the console answers: Windows is starting or its SSH server has
+        # stopped. Earlier readiness no longer holds.
+        waiting = check("unknown", "Waiting for Windows SSH")
+        s["checks"] = {"ssh":check("offline","SSH is not reachable; Windows may be starting") if caps.get("ssh")
+                       else check("missing","SSH connection is not configured"),
+                       "desktop":waiting, "cua":waiting,
+                       "aside":waiting if caps.get("aside") else check("disabled","Aside integration is disabled")}
+        return s
     if not deep:
         if previous:
             s["error"] = previous.get("error", "")
-            s["checks"] = dict(previous.get("checks", {}))
+            s["checks"] = carried_checks(previous)
             s["resources"] = previous.get("resources", {})
             s["guest"] = previous.get("guest", {})
             if s["error"]:
                 s["summary"]="Windows is reachable; connection checks failed"
-            elif ssh_port and previous.get("state")=="running" and fresh_checks(previous, config["pollSeconds"]):
+            elif previous.get("state")=="running" and fresh_checks(previous, config["pollSeconds"]):
                 s["summary"]=previous.get("summary",s["summary"])
-            elif ssh_port:
+            else:
                 s["summary"]="Windows is reachable; connection checks are due"
         return s
     s["checks"]["ssh"]=check("missing","SSH connection is not configured")
-    if not caps["ssh"] or not ssh_port:
+    if not caps["ssh"]:
         return s
     try:
         guest = parse_guest(guest_status())

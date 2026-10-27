@@ -1,17 +1,21 @@
 """Explicit operations. A terminal-owned worker survives shell reloads."""
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
 from core import (ROOT, OperationError, admission, backups, busy, check, collect, now, operation, read_json,
                   reservation_fresh, run, settings, state_dir, viewer_windows, windows_reachability, wrapper, write_json)
 from mcp import Client
+from probes import install_shutdown_handlers
 
 ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections"}
 ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
@@ -23,6 +27,32 @@ OMARCHY_ACTIONS = {"open", "start", "stop", "shared", "backup", "verify", "label
 OMARCHY_TERMINAL = {"restore"}
 BACKUP_IDS = {"omarchy-windows": r"(?:baseline|development-ready|omachines)-\d{8}T\d{6}Z(?:-[0-9a-f]{6})?",
               "omarchy-qemu": r"omarchy-\d{8}T\d{6}Z"}
+held = None      # this worker's locked operation.lock
+OPEN_WAIT = 600  # seconds a Windows open may wait for authorization and startup
+stopping = []    # termination signals deferred until the outcome is recorded
+providing = 0    # providers this worker supervises right now
+ran = []         # providers started during this operation
+cancellable = False  # perform() runs: a signal outside a provider cancels it
+
+
+class Cancelled(BaseException):
+    # A stop request while the operation waits on nothing but itself, such as
+    # a typed confirmation. BaseException, so provider error handling skips it.
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextmanager
+def providing_work():
+    # Stop requests wait while a provider runs: it is never abandoned.
+    global providing
+    providing += 1
+    ran.append(True)
+    try:
+        yield
+    finally:
+        providing -= 1
 
 
 def omarchy(machine):
@@ -49,6 +79,39 @@ def record(action, status, message, **extra):
         import history
         history.append(value)
     return value
+
+
+def say(text="", end="\n"):
+    # The operation terminal can close mid-operation; the work continues.
+    try:
+        print(text, end=end, flush=True)
+    except OSError:
+        pass
+
+
+@contextmanager
+def provider(argv, detach=False, **kwargs):
+    # A worker's provider runs under supervise.py, which inherits the locked
+    # operation.lock and outlives a worker that dies early. The lock is thus
+    # released only when the provider has finished. A detached provider runs
+    # in its own session: the operation terminal's hangup, termination and
+    # Ctrl+C reach only the worker. sudo needs that terminal for its password,
+    # so Windows providers stay attached.
+    if held is not None:
+        argv = ["/usr/bin/python3", "-I", "-B", str(ROOT/"backend/supervise.py"), *argv]
+        kwargs["pass_fds"] = (held.fileno(),)
+    if detach:
+        kwargs["start_new_session"] = True
+    with providing_work():
+        p = subprocess.Popen(argv, **kwargs)
+        try:
+            yield p
+        finally:
+            # Never report an outcome while the provider still runs. The
+            # supervisor drains any output this worker no longer reads.
+            if p.stdout:
+                p.stdout.close()
+            p.wait()
 
 
 def notify(message, config):
@@ -102,10 +165,61 @@ def request_action(action, config, confirmed=False, parameters=None, machine_id=
 def vm_priv(action):
     if action not in ("up","down"):
         raise OperationError("Invalid VM operation")
-    result=subprocess.run(["sudo","/usr/bin/env",f"PKEXEC_UID={os.getuid()}",
-                           "/usr/bin/omarchy-windows-vm","__priv",action],check=False)
+    with provider(["sudo","/usr/bin/env",f"PKEXEC_UID={os.getuid()}",
+                   "/usr/bin/omarchy-windows-vm","__priv",action]) as result:
+        pass
     if result.returncode:
         raise OperationError("VM operation failed or authentication was cancelled")
+
+
+def open_windows(launcher):
+    # The launcher can wait at an authorization prompt before it starts
+    # Windows. Until its viewer appears this request owns the lifecycle and
+    # keeps the lock, so a later shutdown or backup cannot be overtaken by an
+    # old prompt approved afterwards. The viewer then runs on its own.
+    argv,kwargs=[launcher],{"stdin":subprocess.DEVNULL,"stdout":subprocess.DEVNULL,"stderr":subprocess.DEVNULL,
+                            "start_new_session":True}
+    if held is not None:
+        argv=["/usr/bin/python3","-I","-B",str(ROOT/"backend/supervise.py"),"--until-released",launcher]
+        kwargs["pass_fds"]=(held.fileno(),)
+    record("open","running","Starting Windows; approve the authorization prompt if one appears")
+    with providing_work():
+        p=subprocess.Popen(argv,**kwargs)
+        deadline=time.monotonic()+OPEN_WAIT
+        while p.poll() is None:
+            if viewer_windows():
+                if held is not None:
+                    p.send_signal(signal.SIGUSR1);p.wait()
+                return "Windows viewer opened"
+            if time.monotonic()>deadline:
+                # Withdraw the request, including a prompt nobody answered.
+                try:os.killpg(p.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+                p.wait()
+                raise OperationError("Windows did not start within 10 minutes; the request was withdrawn")
+            time.sleep(0.5)
+    if p.returncode:
+        raise OperationError("Windows did not start, or authorization was cancelled")
+    return "Windows viewer closed"
+
+
+def ensure_memory():
+    # Refuse before starting Windows when the host has less memory free than
+    # its configured RAM (8 GiB when unknown). Not needed once it is running.
+    if windows_reachability({})[0] in ("running","starting"):
+        return
+    import machines
+    allocation=machines.admin_state().get("allocation")
+    ram=re.fullmatch(r"([1-9][0-9]{0,3})G",str(allocation.get("ram","") if isinstance(allocation,dict) else ""))
+    need=int(ram[1]) if ram else 8
+    try:
+        free=machines.host_resources()["availableBytes"]
+    except (OSError,ValueError,IndexError):
+        free=None
+    # An unreadable value is not a reason to refuse; a reading of 0 is.
+    if free is not None and free<need*1024**3:
+        raise OperationError(f"Only {int(free*10/1024**3)/10:g} GiB of memory is free; Windows needs {need} GiB. "
+                             "Shut down the other VM or close apps first.")
 
 
 def write_diagnostics(config, machine_id=None):
@@ -140,25 +254,24 @@ def backup(config):
     # latest-backup pointer. Never drop the original development baseline.
     write_json(state_dir()/"backups.json", backups(config))
     record("backup","running","Waiting for your Omarchy password")
-    print("\nOmachines: complete Windows backup\n")
-    print("Windows will shut down temporarily. The sudo prompt asks for your Omarchy password.")
-    print("The backup includes the disk, TPM, firmware and private VM configuration. Shared files are separate.\n",flush=True)
-    # stdout is tee'd to this visible terminal; retain only exact stage markers.
-    p=subprocess.Popen(["sudo","/usr/bin/bash",str(script)],stdout=subprocess.PIPE,
-                       stderr=None,stdin=None,text=True,bufsize=1,
-                       env={**os.environ,"OMACHINES_PROGRESS_FD":"1"})
+    say("\nOmachines: complete Windows backup\n")
+    say("Windows will shut down temporarily. The sudo prompt asks for your Omarchy password.")
+    say("The backup includes the disk, TPM, firmware and private VM configuration. Shared files are separate.\n")
     # sudo may filter environment; provider emits stage markers unconditionally.
     stages={"preflight":"Checking Windows and backup space","stopping":"Shutting down Windows",
             "copying":"Copying the complete disk, TPM and firmware","verifying":"Verifying the archive and checksum",
             "starting":"Starting Windows again","complete":"Backup verified; Windows is starting"}
-    for line in p.stdout:
-        print(line,end="",flush=True)
-        marker=line.strip()
-        if marker.startswith("OMACHINES_STAGE:"):
-            stage=marker.partition(":")[2]
-            if stage in stages:
-                record("backup","running",stages[stage])
-    p.wait()
+    # stdout is tee'd to this visible terminal; retain only exact stage markers.
+    with provider(["sudo","/usr/bin/bash",str(script)],stdout=subprocess.PIPE,
+                  stderr=None,stdin=None,text=True,bufsize=1,
+                  env={**os.environ,"OMACHINES_PROGRESS_FD":"1"}) as p:
+        for line in p.stdout:
+            say(line,end="")
+            marker=line.strip()
+            if marker.startswith("OMACHINES_STAGE:"):
+                stage=marker.partition(":")[2]
+                if stage in stages:
+                    record("backup","running",stages[stage])
     if p.returncode:
         raise OperationError("Backup did not finish. Check this terminal; Windows may need starting.")
     try:
@@ -177,7 +290,7 @@ def backup(config):
     write_json(state_dir()/"backups.json",records)
     record("backup","running","Backup verified; checking Windows recovery")
     deadline=time.monotonic()+150
-    while time.monotonic()<deadline:
+    while time.monotonic()<deadline and not stopping:
         # Pinned: the panel may switch to another machine during the backup.
         state=collect(config,deep=True,machine_id="windows")
         if state.get("checks",{}).get("ssh",{}).get("status")=="ready":
@@ -221,11 +334,11 @@ def windows_storage_attached(anchor):
 def wait_windows_ready(timeout=300):
     from core import guest_status
     if not wrapper("windows-vm-ssh"):
-        print("Windows SSH is not configured; allowing two minutes for Windows to finish starting.",flush=True)
+        say("Windows SSH is not configured; allowing two minutes for Windows to finish starting.")
         time.sleep(120)
         return True
     deadline=time.monotonic()+timeout
-    while time.monotonic()<deadline:
+    while time.monotonic()<deadline and not stopping:
         try:
             guest_status()
             return True
@@ -244,10 +357,11 @@ def attach_windows_storage():
     # its identity and refuses a wrong one.
     if not anchor.parent.is_dir() or str(anchor) in mount_points() or windows_reachability({})[0] in ("running","starting"):
         return False
-    print("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
-    print("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
-    print("down cleanly, then back it up. Windows stays stopped afterwards. sudo may ask for your")
-    print("Omarchy password more than once.\n",flush=True)
+    ensure_memory()
+    say("\nWindows storage is not attached: Omarchy attaches it when Windows starts, and the host has")
+    say("restarted since then. Omachines will start Windows, wait for it to finish starting, shut it")
+    say("down cleanly, then back it up. Windows stays stopped afterwards. sudo may ask for your")
+    say("Omarchy password more than once.\n")
     record("backup","running","Starting Windows to attach its storage")
     vm_priv("up")
     error=None
@@ -260,7 +374,7 @@ def attach_windows_storage():
     except OperationError as failure:
         error=failure
     record("backup","running","Shutting down Windows before the backup")
-    print("Shutting down Windows before the backup...",flush=True)
+    say("Shutting down Windows before the backup...")
     vm_priv("down")
     if error:
         raise error
@@ -290,9 +404,10 @@ def perform(action, config, parameters=None, machine=None):
         launcher=wrapper("windows-vm-launch")
         if not launcher:
             raise OperationError("Windows viewer wrapper is missing")
-        subprocess.Popen([launcher],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-        return "Windows viewer requested"
+        ensure_memory()
+        return open_windows(launcher)
     if action=="start":
+        ensure_memory()
         vm_priv("up")
         return "Windows started; connections may take a moment"
     if action=="stop":
@@ -359,7 +474,36 @@ def perform(action, config, parameters=None, machine=None):
     raise OperationError("Unknown action")
 
 
+def defer(signum, _frame):
+    # A worker asked to stop keeps supervising its provider and records the
+    # outcome, then exits; it never abandons work that is still running.
+    if signum==signal.SIGHUP:
+        # The operation terminal closed; continue without it.
+        null=os.open(os.devnull,os.O_RDWR)
+        for fd in (0,1,2):os.dup2(null,fd)
+        os.close(null)
+    if cancellable and not providing:
+        # Nothing runs for it: waiting would only hold the lock.
+        raise Cancelled(signum)
+    stopping.append(signum)
+
+
 def worker(action, request_id, interactive=False):
+    stopping.clear()
+    ran.clear()
+    previous={}
+    if threading.current_thread() is threading.main_thread():
+        # Supersede the probe owner's handlers, which exit at once.
+        install_shutdown_handlers()
+        previous={sig:signal.signal(sig,defer) for sig in (signal.SIGTERM,signal.SIGHUP,signal.SIGINT)}
+    try:
+        return supervised(action,request_id,interactive)
+    finally:
+        for sig,handler in previous.items():signal.signal(sig,handler)
+
+
+def supervised(action, request_id, interactive):
+    global held
     with open(state_dir()/"operation.lock","a") as lock:
         try:
             # The child can start before Popen returns in the requesting
@@ -391,30 +535,55 @@ def worker(action, request_id, interactive=False):
                     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise OperationError("Another operation is still running") from None
+                if stopping:
+                    record(action,"failed","Stopped before it began; nothing was changed")
+                    raise OperationError("Stopped before it began; nothing was changed")
+                held=lock
                 record(action,"running","Preparing "+action,requestId=request_id)
         except OperationError as error:
             if interactive:
-                print(str(error),flush=True)
+                say(str(error))
             return 1
+        global cancellable
         try:
-            message=perform(action,config,reservation.get("parameters",{}),machine)
+            cancellable=True
+            try:
+                message=perform(action,config,reservation.get("parameters",{}),machine)
+            finally:
+                cancellable=False
             record(action,"complete",message)
             if action in TERMINAL or action in ("diagnostics","backup","verify","allocate"):
                 notify(message,config)
             if interactive:
-                print("\n"+message,flush=True)
-            return 0
+                say("\n"+message)
+            code=0
+        except Cancelled as cancel:
+            stopping.append(cancel.signum)
+            message=("Cancelled between steps; check the VM before retrying" if ran else "Cancelled; nothing was changed")
+            record(action,"failed",message)
+            if interactive and cancel.signum!=signal.SIGHUP:
+                say("\n"+message)
+            code=1
         except Exception as error:
             message=str(error) if isinstance(error,OperationError) else "Operation failed. Check the connection and try again."
             record(action,"failed",message)
             notify(message,config)
-            if interactive:
-                print("\n"+message,flush=True)
+            if interactive and not stopping:
+                say("\n"+message)
+                # The outcome is recorded and nothing runs: other operations
+                # need not wait while the message is read.
+                fcntl.flock(lock,fcntl.LOCK_UN)
+                cancellable=True
                 try:
                     input("Press Enter to close this terminal. ")
-                except EOFError:
+                except (EOFError,OSError,Cancelled):
                     pass
-            return 1
+                finally:
+                    cancellable=False
+            code=1
+        finally:
+            held=None
+        return 128+stopping[0] if stopping else code
 
 
 def validate_parameters(action, values, machine=None):
@@ -445,15 +614,14 @@ def admin_action(action,parameters):
         if key in parameters:args += [flag,str(parameters[key])]
     # Keep stdin attached to the visible operation terminal for sudo and restore
     # confirmation. Output contains only administrator-helper stage summaries.
-    p=subprocess.Popen(args,stdout=subprocess.PIPE,text=True,bufsize=1)
     messages=[]
-    for line in p.stdout:
-        print(line,end='',flush=True)
-        line=line.strip()
-        if line.startswith('OMACHINES_STAGE:'):
-            stage=line.partition(':')[2]
-            record(action,'running',{'preflight':'Checking configuration and capacity','stopping':'Stopping Windows','copying':'Copying Windows storage','verifying':'Checking backup integrity','restoring':'Restoring into a separate directory','booting':'Booting the offline restored copy','starting':'Starting Windows','complete':'Operation finishing'}.get(stage,'Operation in progress'))
-        elif line:messages.append(line[:300]);messages=messages[-3:]
-    p.wait()
+    with provider(args,stdout=subprocess.PIPE,text=True,bufsize=1) as p:
+        for line in p.stdout:
+            say(line,end='')
+            line=line.strip()
+            if line.startswith('OMACHINES_STAGE:'):
+                stage=line.partition(':')[2]
+                record(action,'running',{'preflight':'Checking configuration and capacity','stopping':'Stopping Windows','copying':'Copying Windows storage','verifying':'Checking backup integrity','restoring':'Restoring into a separate directory','booting':'Booting the offline restored copy','starting':'Starting Windows','complete':'Operation finishing'}.get(stage,'Operation in progress'))
+            elif line:messages.append(line[:300]);messages=messages[-3:]
     if p.returncode:raise OperationError(messages[-1] if messages else 'Administrator operation failed or authentication was cancelled')
     return messages[-1] if messages else 'Administrator operation complete'

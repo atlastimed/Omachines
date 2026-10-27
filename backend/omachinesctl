@@ -16,6 +16,9 @@ import machines
 from operations import ACTIONS, request_action, worker
 from probes import close_all, install_shutdown_handlers
 
+FOLLOW_EVERY=20   # seconds between follow-up deep checks after SSH returns
+FOLLOW_FOR=300    # and for how long
+
 
 def emit(value):
     print(json.dumps(value,ensure_ascii=False,separators=(",",":")),flush=True)
@@ -29,6 +32,38 @@ def stale(result, config):
         return result["machineId"]!=machines.selected()["id"]
     except ValueError:
         return False
+
+
+def regained(old, new):
+    # SSH answers again: the machine came back, or outside maintenance ended.
+    return (new.get("state")=="running" and not new.get("maintenance") and old.get("machineId")==new.get("machineId")
+            and (old.get("state") not in ("running","unknown","checking") or bool(old.get("maintenance"))))
+
+
+def came_back(old, new):
+    """Why a deep check is due at once: "ssh" when SSH answers again (the
+    follow-up checks start), "maintenance" when outside maintenance ended in
+    any other known state, such as a backup that left the VM stopped, so the
+    catalogue and allocation it changed are read now. Otherwise None."""
+    if regained(old,new):
+        return "ssh"
+    if (old.get("maintenance") and not new.get("maintenance") and old.get("machineId")==new.get("machineId")
+            and new.get("state") not in ("unknown","checking")):
+        return "maintenance"
+    return None
+
+
+def follow_up(snapshot, since, last, clock):
+    """After SSH came back at `since`, whether another deep check is due now
+    (True), later (False) or no longer needed (None). A guest still signing in
+    is checked about every 20 s for 5 minutes, never during an operation."""
+    checks=snapshot.get("checks",{})
+    waiting=(checks.get("desktop",{}).get("status")!="available"
+             or checks.get("cua",{}).get("status") not in ("ready","missing"))
+    if (since is None or not waiting or clock-since>FOLLOW_FOR or snapshot.get("state")!="running"
+            or snapshot.get("maintenance")):
+        return None
+    return snapshot.get("operation",{}).get("status") not in ("starting","running") and clock-last>=FOLLOW_EVERY
 
 
 def select(machine_id, snapshot):
@@ -53,8 +88,11 @@ def daemon():
     pool=concurrent.futures.ThreadPoolExecutor(max_workers=1)
     snapshot={"state":"checking","summary":"Checking machines","checks":{},"resources":{},"backups":[],"operation":{},"capabilities":{},"machines":[]}
     pending=None
+    pending_deep=False
     due=0
     deep_due=0
+    deep_at=0
+    since=None    # when SSH last came back, while follow-up checks may be due
     requested=False
     buffer=b""
     emit(snapshot)
@@ -67,14 +105,26 @@ def daemon():
                 if stale(result,config):
                     requested=True
                 else:
+                    # SSH has just become reachable, or outside maintenance
+                    # ended: check now instead of at the next deep poll.
+                    reason=came_back(snapshot,result)
+                    if reason:
+                        since=clock if reason=="ssh" else since
+                        requested=requested or not pending_deep
                     snapshot=result
                     emit(snapshot)
+            if not pending and not requested:
+                due_now=follow_up(snapshot,since,deep_at,clock)
+                since=None if due_now is None else since
+                requested=bool(due_now)
             if not pending and (requested or clock>=due):
                 deep=(requested or clock>=deep_due) and snapshot.get("operation",{}).get("status") not in ("starting","running")
                 pending=pool.submit(refresh_snapshot,dict(config),dict(snapshot),deep)
+                pending_deep=deep
                 requested=False
                 due=clock+15
                 if deep:
+                    deep_at=clock
                     deep_due=clock+config["pollSeconds"]
             op=operation() if not config["demo"] else {}
             if op!=snapshot.get("operation",{}):
@@ -114,6 +164,7 @@ def daemon():
                         snapshot=select(command.get("machineId"),snapshot)
                         emit(snapshot)
                         requested=True
+                        since=None
                     else:
                         raise OperationError("Unknown command")
                 except Exception as error:

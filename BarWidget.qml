@@ -71,7 +71,8 @@ Panel {
       onMoveRequested: function(dx,dy) { view.moveCursor(dx,dy) }
       onActivateRequested: view.activate()
       onTextKey: function(key) { view.textKey(key) }
-      onTabRequested: function(direction) { if (view.section === "Backups" || view.section === "Settings") view.focusEditor(); else root.switchPanel(direction) }
+      // Tab enters a usable form; a disabled or empty one leaves these keys active.
+      onTabRequested: function(direction) { if (view.section !== "Backups" && view.section !== "Settings") root.switchPanel(direction); else if (!view.focusEditor()) keys.forceActiveFocus() }
       Keys.onEscapePressed: { if (view.confirmation) view.confirmation = ""; else root.close() }
       Flickable {
         id: flick
