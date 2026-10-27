@@ -144,6 +144,14 @@ while not (marks/'release').exists():time.sleep(0.02)
 for _ in range(3):print('Backup omarchy-20261027T000000Z saved and verified',flush=True)
 (marks/'done').write_text(' '.join(sys.argv[1:]))
 """
+# Runs omachinesctl on a fixed 32 GiB host, so the allocation capacity check
+# does not depend on the test runner's memory.
+FIXED_HOST = """import os,runpy,sys
+real=os.sysconf
+os.sysconf=lambda name: 32*1024**3//real('SC_PAGE_SIZE') if name=='SC_PHYS_PAGES' else real(name)
+sys.argv=sys.argv[1:]
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
 
 
 class ProviderLifetimeTests(unittest.TestCase):
@@ -175,7 +183,7 @@ class ProviderLifetimeTests(unittest.TestCase):
         started = time.time()
         core.write_json(core.state_dir()/"operation.json", {"action":action,"status":"starting","machineId":"omarchy",
                         "requestId":"fixture","startedEpoch":started,"expiresEpoch":started+120,"parameters":parameters})
-        argv = [sys.executable,"-B",str(BACKEND/"omachinesctl"),"worker",action,"--request-id","fixture"]
+        argv = [sys.executable,"-B","-c",FIXED_HOST,str(BACKEND/"omachinesctl"),"worker",action,"--request-id","fixture"]
         worker = subprocess.Popen(argv+(["--interactive"] if action=="restore" else []), env=self.env,
                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: worker.poll() is None and (worker.kill(), worker.wait()))
