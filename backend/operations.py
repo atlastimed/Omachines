@@ -30,6 +30,29 @@ BACKUP_IDS = {"omarchy-windows": r"(?:baseline|development-ready|omachines)-\d{8
 held = None      # this worker's locked operation.lock
 OPEN_WAIT = 600  # seconds a Windows open may wait for authorization and startup
 stopping = []    # termination signals deferred until the outcome is recorded
+providing = 0    # providers this worker supervises right now
+ran = []         # providers started during this operation
+cancellable = False  # perform() runs: a signal outside a provider cancels it
+
+
+class Cancelled(BaseException):
+    # A stop request while the operation waits on nothing but itself, such as
+    # a typed confirmation. BaseException, so provider error handling skips it.
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextmanager
+def providing_work():
+    # Stop requests wait while a provider runs: it is never abandoned.
+    global providing
+    providing += 1
+    ran.append(True)
+    try:
+        yield
+    finally:
+        providing -= 1
 
 
 def omarchy(machine):
@@ -79,15 +102,16 @@ def provider(argv, detach=False, **kwargs):
         kwargs["pass_fds"] = (held.fileno(),)
     if detach:
         kwargs["start_new_session"] = True
-    p = subprocess.Popen(argv, **kwargs)
-    try:
-        yield p
-    finally:
-        # Never report an outcome while the provider still runs. The
-        # supervisor drains any output this worker no longer reads.
-        if p.stdout:
-            p.stdout.close()
-        p.wait()
+    with providing_work():
+        p = subprocess.Popen(argv, **kwargs)
+        try:
+            yield p
+        finally:
+            # Never report an outcome while the provider still runs. The
+            # supervisor drains any output this worker no longer reads.
+            if p.stdout:
+                p.stdout.close()
+            p.wait()
 
 
 def notify(message, config):
@@ -159,20 +183,21 @@ def open_windows(launcher):
         argv=["/usr/bin/python3","-I","-B",str(ROOT/"backend/supervise.py"),"--until-released",launcher]
         kwargs["pass_fds"]=(held.fileno(),)
     record("open","running","Starting Windows; approve the authorization prompt if one appears")
-    p=subprocess.Popen(argv,**kwargs)
-    deadline=time.monotonic()+OPEN_WAIT
-    while p.poll() is None:
-        if viewer_windows():
-            if held is not None:
-                p.send_signal(signal.SIGUSR1);p.wait()
-            return "Windows viewer opened"
-        if time.monotonic()>deadline:
-            # Withdraw the request, including a prompt nobody answered.
-            try:os.killpg(p.pid,signal.SIGTERM)
-            except ProcessLookupError:pass
-            p.wait()
-            raise OperationError("Windows did not start within 10 minutes; the request was withdrawn")
-        time.sleep(0.5)
+    with providing_work():
+        p=subprocess.Popen(argv,**kwargs)
+        deadline=time.monotonic()+OPEN_WAIT
+        while p.poll() is None:
+            if viewer_windows():
+                if held is not None:
+                    p.send_signal(signal.SIGUSR1);p.wait()
+                return "Windows viewer opened"
+            if time.monotonic()>deadline:
+                # Withdraw the request, including a prompt nobody answered.
+                try:os.killpg(p.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+                p.wait()
+                raise OperationError("Windows did not start within 10 minutes; the request was withdrawn")
+            time.sleep(0.5)
     if p.returncode:
         raise OperationError("Windows did not start, or authorization was cancelled")
     return "Windows viewer closed"
@@ -448,16 +473,20 @@ def perform(action, config, parameters=None, machine=None):
 def defer(signum, _frame):
     # A worker asked to stop keeps supervising its provider and records the
     # outcome, then exits; it never abandons work that is still running.
-    stopping.append(signum)
     if signum==signal.SIGHUP:
         # The operation terminal closed; continue without it.
         null=os.open(os.devnull,os.O_RDWR)
         for fd in (0,1,2):os.dup2(null,fd)
         os.close(null)
+    if cancellable and not providing:
+        # Nothing runs for it: waiting would only hold the lock.
+        raise Cancelled(signum)
+    stopping.append(signum)
 
 
 def worker(action, request_id, interactive=False):
     stopping.clear()
+    ran.clear()
     previous={}
     if threading.current_thread() is threading.main_thread():
         # Supersede the probe owner's handlers, which exit at once.
@@ -511,24 +540,42 @@ def supervised(action, request_id, interactive):
             if interactive:
                 say(str(error))
             return 1
+        global cancellable
         try:
-            message=perform(action,config,reservation.get("parameters",{}),machine)
+            cancellable=True
+            try:
+                message=perform(action,config,reservation.get("parameters",{}),machine)
+            finally:
+                cancellable=False
             record(action,"complete",message)
             if action in TERMINAL or action in ("diagnostics","backup","verify","allocate"):
                 notify(message,config)
             if interactive:
                 say("\n"+message)
             code=0
+        except Cancelled as cancel:
+            stopping.append(cancel.signum)
+            message=("Cancelled between steps; check the VM before retrying" if ran else "Cancelled; nothing was changed")
+            record(action,"failed",message)
+            if interactive and cancel.signum!=signal.SIGHUP:
+                say("\n"+message)
+            code=1
         except Exception as error:
             message=str(error) if isinstance(error,OperationError) else "Operation failed. Check the connection and try again."
             record(action,"failed",message)
             notify(message,config)
             if interactive and not stopping:
                 say("\n"+message)
+                # The outcome is recorded and nothing runs: other operations
+                # need not wait while the message is read.
+                fcntl.flock(lock,fcntl.LOCK_UN)
+                cancellable=True
                 try:
                     input("Press Enter to close this terminal. ")
-                except (EOFError,OSError):
+                except (EOFError,OSError,Cancelled):
                     pass
+                finally:
+                    cancellable=False
             code=1
         finally:
             held=None

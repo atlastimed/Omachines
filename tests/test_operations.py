@@ -233,6 +233,44 @@ class ProviderLifetimeTests(unittest.TestCase):
                 self.assertEqual(worker.wait(timeout=5), 0)
                 self.assertEqual(core.operation()["status"], "complete")
 
+    def test_confirmation_wait_is_cancelled_at_once(self):
+        # No provider runs while restore waits for its typed confirmation, so
+        # Ctrl+C or termination ends the request instead of holding the lock.
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(sig):
+                parameters, _ = self.ACTIONS["restore"]
+                started = time.time()
+                core.write_json(core.state_dir()/"operation.json", {"action":"restore","status":"starting","machineId":"omarchy",
+                                "requestId":"fixture","startedEpoch":started,"expiresEpoch":started+120,"parameters":parameters})
+                argv = [sys.executable,"-B","-c",FIXED_HOST,str(BACKEND/"omachinesctl"),"worker","restore","--request-id","fixture","--interactive"]
+                worker = subprocess.Popen(argv, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.addCleanup(lambda: worker.poll() is None and (worker.kill(), worker.wait()))
+                self.wait_for(lambda: core.operation().get("message") == "Waiting for typed confirmation")
+                worker.send_signal(sig)
+                self.assertEqual(worker.wait(timeout=5), 128+sig)
+                worker.stdin.close()
+                self.assertFalse(core.busy())
+                self.assertEqual(core.operation()["status"], "failed")
+                self.assertEqual(core.operation()["message"], "Cancelled; nothing was changed")
+                self.assertFalse((self.marks/"started").exists(), "the provider ran")
+
+    def test_failure_message_is_read_without_holding_the_lock(self):
+        parameters, _ = self.ACTIONS["restore"]
+        started = time.time()
+        core.write_json(core.state_dir()/"operation.json", {"action":"restore","status":"starting","machineId":"omarchy",
+                        "requestId":"fixture","startedEpoch":started,"expiresEpoch":started+120,"parameters":parameters})
+        argv = [sys.executable,"-B","-c",FIXED_HOST,str(BACKEND/"omachinesctl"),"worker","restore","--request-id","fixture","--interactive"]
+        worker = subprocess.Popen(argv, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: worker.poll() is None and (worker.kill(), worker.wait()))
+        worker.stdin.write(b"no\n"); worker.stdin.flush()
+        self.wait_for(lambda: core.operation().get("status") == "failed")
+        self.wait_for(lambda: not core.busy())
+        self.assertIsNone(worker.poll(), "the terminal closed before the message was read")
+        worker.send_signal(signal.SIGINT)
+        self.assertEqual(worker.wait(timeout=5), 1)
+        self.assertEqual(core.operation()["message"], "Restore cancelled; Omarchy VM is unchanged")
+        self.assertFalse((self.marks/"started").exists())
+
     def test_killed_worker_leaves_the_lock_with_its_provider(self):
         for action in self.ACTIONS:
             with self.subTest(action):
