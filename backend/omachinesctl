@@ -40,6 +40,19 @@ def regained(old, new):
             and (old.get("state") not in ("running","unknown","checking") or bool(old.get("maintenance"))))
 
 
+def came_back(old, new):
+    """Why a deep check is due at once: "ssh" when SSH answers again (the
+    follow-up checks start), "maintenance" when outside maintenance ended in
+    any other known state, such as a backup that left the VM stopped, so the
+    catalogue and allocation it changed are read now. Otherwise None."""
+    if regained(old,new):
+        return "ssh"
+    if (old.get("maintenance") and not new.get("maintenance") and old.get("machineId")==new.get("machineId")
+            and new.get("state") not in ("unknown","checking")):
+        return "maintenance"
+    return None
+
+
 def follow_up(snapshot, since, last, clock):
     """After SSH came back at `since`, whether another deep check is due now
     (True), later (False) or no longer needed (None). A guest still signing in
@@ -92,10 +105,11 @@ def daemon():
                 if stale(result,config):
                     requested=True
                 else:
-                    # SSH has just become reachable: check the connections
-                    # now instead of at the next deep poll.
-                    if regained(snapshot,result):
-                        since=clock
+                    # SSH has just become reachable, or outside maintenance
+                    # ended: check now instead of at the next deep poll.
+                    reason=came_back(snapshot,result)
+                    if reason:
+                        since=clock if reason=="ssh" else since
                         requested=requested or not pending_deep
                     snapshot=result
                     emit(snapshot)

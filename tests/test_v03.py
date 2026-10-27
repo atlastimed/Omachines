@@ -448,6 +448,18 @@ class DaemonTests(Base):
         self.assertFalse(self.ctl.regained(after, after))
         self.assertFalse(self.ctl.regained({**during, "state": "stopped"}, during))
 
+    def test_outside_maintenance_ending_refreshes_whatever_state_it_left(self):
+        during = {"state": "stopped", "maintenance": "backup", "machineId": "omarchy"}
+        back = self.ctl.came_back
+        # A backup or resource change that leaves the VM stopped still refreshes the catalogue at once.
+        self.assertEqual(back(during, {**during, "maintenance": None}), "maintenance")
+        self.assertEqual(back({**during, "state": "running"}, {"state": "running", "maintenance": None, "machineId": "omarchy"}), "ssh")
+        for state in ("unknown", "checking"):
+            self.assertIsNone(back(during, {**during, "maintenance": None, "state": state}))
+        self.assertIsNone(back(during, {**during, "maintenance": None, "machineId": "windows"}))
+        self.assertIsNone(back(during, during))
+        self.assertIsNone(back({**during, "maintenance": None}, {**during, "maintenance": None}))
+
     def test_follow_up_checks_while_the_guest_signs_in(self):
         def snapshot(desktop="signed-out", cua="offline", **extra):
             return {"state": "running", "operation": {}, "checks": {"desktop": core.check(desktop, ""), "cua": core.check(cua, "")}, **extra}
