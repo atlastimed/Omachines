@@ -13,13 +13,20 @@ in an isolated fixture. R1 is in this repository; R2–R4 are in the Omarchy VM 
 | R3: two plain `create` commands could overwrite a disk | The disk's existence and a stopped VM are checked only while holding the lifecycle lock. | The review's interleaving with real `flock` and `qemu-img`: the delayed create refuses and the disk is unchanged; a running VM is never given a new disk. |
 | R4: CPU writer and reader disagreed above 16 | One rule (`MAX_CPUS`) checks the whole configuration when it is read and before a change is saved; changes accept at most `min(16, host CPUs)`. | A 24-CPU host: 17 refused before anything is written or stopped, 16 accepted, the saved file always readable. |
 
+A Codex review of `227d580` found that the worker deferred Ctrl+C and termination
+for its whole operation, so a restore waiting at its typed confirmation could not be
+cancelled and kept the lock. Stop requests now wait only while a provider or the
+Windows launcher runs, and cancel at once otherwise; the lock is also released
+before a failure message waits for Enter. Real-worker tests cover SIGINT and SIGTERM
+at the confirmation and the released lock (both fail on `227d580`).
+
 While adding those tests, one regression from the first system-review commit was
 found and fixed: `omarchy-vm start` had lost its wait for QEMU's monitor (it moved
 into the post-maintenance restart helper), so `start` returned before QEMU answered.
 
 ### Verification
 
-`python3 scripts/check.py` passes 192 Python tests, manifest validation, qmllint
+`python3 scripts/check.py` passes 194 Python tests, manifest validation, qmllint
 without warnings and 35 native Qt passes; the privacy check is clean. The Omarchy VM
 tooling's 12 tests pass (`python3 -m unittest discover -s tests` in its folder).
 

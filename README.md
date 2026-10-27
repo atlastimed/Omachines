@@ -137,6 +137,9 @@ Each VM command runs under a small supervisor that holds the operation lock unti
 the command itself ends. Closing the operation terminal, or stopping Omachines
 mid-operation, cannot let another operation or an update start while the command
 still runs: a stopped worker first waits for the command and records its result.
+Before any command has started, such as at a restore's typed confirmation, Ctrl+C
+cancels at once and nothing is changed. A failure message left on screen no longer
+holds up other operations.
 If the worker is killed outright, the panel shows the operation as still running
 until the command ends, then as interrupted.
 
