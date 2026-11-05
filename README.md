@@ -10,8 +10,9 @@ already be configured. A VM creation wizard and arbitrary providers are future w
 
 ## Use
 
-Click **VM** on the bar. The label adds a logo for each running VM (the Windows
-logo, or the Arch logo for the Omarchy VM) and the tooltip lists every machine.
+Click the Omachines icon on the bar: a cube while no VM runs, the logo of each
+running VM (the Windows logo, or the Arch logo for the Omarchy VM), with an
+hourglass in front while an operation runs. The tooltip lists every machine.
 Right-click opens or focuses the selected machine; middle-click checks connections.
 Closing a viewer keeps its VM running. The Omarchy VM opens in gliff, Omarchy's remote
 desktop over SSH, once its desktop has signed in, and in the SPICE viewer before that

@@ -15,7 +15,14 @@ function ago(value, now) {
 function isOmarchy(state) { return !!state && state.provider === "omarchy-qemu" }
 function name(state) { return state && state.name ? state.name : "the VM" }
 // Nerd Font glyphs: Windows logo, Arch logo (Omarchy is Arch-based), monitor.
-function machineIcon(provider) { return provider === "omarchy-qemu" ? "" : provider === "omarchy-windows" ? "" : "󰍹" }
+// Material Design glyphs, the family Omarchy's own bar icons use.
+var GLYPH_IDLE = "\u{F01A7}"     // nf-md-cube_outline: no VM running
+var GLYPH_BUSY = "\u{F051F}"     // nf-md-timer_sand: an operation is running
+function machineIcon(provider) {
+  return provider === "omarchy-qemu" ? "\u{F08C7}"        // nf-md-arch
+    : provider === "omarchy-windows" ? "\u{F05B3}"        // nf-md-microsoft_windows
+    : GLYPH_IDLE
+}
 function machines(state) { return (state && state.machines || []).filter(function(m) { return m && m.id }) }
 function on(state) { return ["running", "starting", "paused", "stopping", "error"].indexOf(state) >= 0 }
 function stateWord(row) {
@@ -31,13 +38,14 @@ function machineName(state, id) {
   var row = machines(state).filter(function(m) { return m.id === id })[0]
   return row ? row.name : ""
 }
-// Compact bar label: the glyph of each running VM, so either VM being on is
-// visible at a glance. Vertical bars stack the glyphs.
-function barText(state, vertical, showLabel) {
-  var running = machines(state).filter(function(m) { return m.active === true || (m.active === undefined && on(m.state)) })
-  var icons = running.map(function(m) { return machineIcon(m.provider) })
-  if (vertical || !showLabel) return icons.length ? icons.join(vertical ? "\n" : " ") : "󰍹"
-  return "󰍹 VM" + (icons.length ? " " + icons.join(" ") : "") + (active(state) ? "…" : "")
+// The bar entry, icons only: the logo of each running VM, so either VM being
+// on is visible at a glance; an hourglass while an operation runs; a cube when
+// nothing runs. The tooltip names every machine.
+function barIcons(state) {
+  var icons = machines(state).filter(function(m) { return m.active === true || (m.active === undefined && on(m.state)) })
+    .map(function(m) { return machineIcon(m.provider) })
+  if (active(state)) icons.unshift(GLYPH_BUSY)
+  return icons.length ? icons : [GLYPH_IDLE]
 }
 function tooltip(state) {
   var rows = machines(state)

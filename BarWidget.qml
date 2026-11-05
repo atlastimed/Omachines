@@ -11,6 +11,7 @@ Panel {
   readonly property var popupTokens: Commons.Color.popups
   readonly property var fontTokens: Style.font
   readonly property var spacingTokens: Style.spacing
+  readonly property var barTokens: Style.bar
   moduleName: "atlastimed.omachines"
   manageIpc: false
   readonly property var hostBar: bar
@@ -44,13 +45,41 @@ Panel {
   WidgetButton {
     id: button
     bar: root.bar
-    // Shows a glyph for each running VM; the tooltip names every machine.
-    text: Model.barText(root.snapshot, root.vertical, root.flag("showLabel",true))
+    // A glyph for each running VM (see Model.barIcons). One icon is drawn by
+    // WidgetButton itself, as Omarchy's icons are; several are drawn the same
+    // way side by side.
+    readonly property var icons: Model.barIcons(root.snapshot)
+    readonly property bool composed: icons.length > 1 && !root.vertical
+    text: composed ? "" : icons.join("\n")
+    hasVisualContent: true
+    fixedWidth: composed ? Math.ceil(partsRow.implicitWidth + button.scaledHorizontalMargin * 2) : -1
     tooltipText: "Omachines · " + Model.tooltip(root.snapshot)
     onPressed: function(code) {
       if (code === Qt.LeftButton) root.toggle()
       else if (code === Qt.MiddleButton) root.refresh()
       else if (code === Qt.RightButton && root.machineService) root.machineService.action("open",false,{},root.snapshot.machineId || "")
+    }
+
+    Row {
+      id: partsRow
+      objectName: "bar-parts"
+      visible: button.composed
+      anchors.centerIn: parent
+      spacing: Style.space(4)
+      scale: button.pressScale
+      Repeater {
+        model: button.composed ? button.icons : []
+        delegate: OpticalGlyph {
+          required property string modelData
+          width: root.barTokens.iconCanvas
+          height: root.barTokens.iconCanvas
+          text: modelData
+          fontFamily: button.fontFamily
+          fontSize: root.barTokens.iconFont
+          paintedSize: root.barTokens.iconSize
+          color: button.foreground
+        }
+      }
     }
   }
   KeyboardPanel {

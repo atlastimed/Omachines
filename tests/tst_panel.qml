@@ -118,15 +118,14 @@ Window {
       view.machine=omarchyMachine({operation:{status:"complete",action:"stop",machineId:"omarchy",message:"Omarchy VM shut down"}})
       verify(findChild(view,"operation-message").visible)
     }
-    function test_bar_text_shows_each_running_vm() {
+    function test_bar_icons_show_each_running_vm() {
       var state={machines:both,operation:{}}
-      compare(Model.barText({machines:[]},false,true),"󰍹 VM")
-      compare(Model.barText(state,false,true),"󰍹 VM \uf17a")
+      compare(Model.barIcons({machines:[]}),["\u{F01A7}"])
+      compare(Model.barIcons(state),["\u{F05B3}"])
       state.machines=[both[0],Object.assign({},both[1],{active:true})]
-      compare(Model.barText(state,false,true),"󰍹 VM \uf17a \uf303")
-      compare(Model.barText(state,true,true),"\uf17a\n\uf303")
-      compare(Model.barText({machines:[Object.assign({},both[0],{active:false})],operation:{status:"running"}},false,true),"󰍹 VM…")
-      compare(Model.barText({machines:[]},false,false),"󰍹")
+      compare(Model.barIcons(state),["\u{F05B3}","\u{F08C7}"])
+      compare(Model.barIcons({machines:[Object.assign({},both[0],{active:false})],operation:{status:"running"}}),["\u{F051F}"])
+      compare(Model.barIcons({machines:state.machines,operation:{status:"running"}}),["\u{F051F}","\u{F05B3}","\u{F08C7}"])
       compare(Model.tooltip(state),"Windows 11: Windows is ready · Omarchy VM: Omarchy VM is stopped")
     }
     function openConfirmation() {
