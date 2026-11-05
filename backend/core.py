@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 ID = "atlastimed.omachines"
 
 

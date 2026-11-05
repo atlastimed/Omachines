@@ -179,6 +179,23 @@ Related fix outside this repository: `omarchy-vm view` used the legacy
 `hyprctl dispatch focuswindow`, which Hyprland's Lua configuration rejects. It now
 uses `hl.dsp.focus`, and focusing an existing viewer was verified.
 
+## v0.3.2: gliff viewer for the Omarchy VM (5 November 2026)
+
+Host and guest on Omarchy 4.5.0 (guest updated from 4.0.6 after backup
+`omarchy-20261105T123207Z`), gliff 0.4.2 on both, Hyprland 0.56.2.
+
+1. **Checks — passed.** `python3 scripts/check.py`: 198 backend tests, plugin
+   validation and 35 offscreen Qt interaction tests.
+2. **Open, physical desktop — passed.** With the Omarchy VM running and its desktop
+   signed in, `omachinesctl action open --machine omarchy` (the installed 0.3.2
+   runtime) opened one gliff window titled `omarchy-vm — Gliff` ("Omarchy VM viewer
+   requested"); a second Open focused it ("Omarchy VM viewer focused") and no second
+   window appeared. `omarchy-vm status --json` then reported `"viewer": "gliff"`,
+   which `parse_status` ignores as before.
+3. **Not run:** Open while the guest is still booting (SPICE fallback, then gliff on
+   the next Open), and the panel's Open button clicked by hand; both use the same
+   `omarchy-vm view` path, whose fallback is covered by omarchy-vm's own tests.
+
 ## Known limitations
 
 - One operation runs at a time across both machines (shared reservation and lock).

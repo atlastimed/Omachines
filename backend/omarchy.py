@@ -317,6 +317,13 @@ def forced(report):
     return " (the VM had to be forced off first)" if report["forced"] else ""
 
 
+def viewer_window(client):
+    """A window showing the Omarchy VM: gliff on its tab (the default viewer) or SPICE."""
+    title = str(client.get("title", ""))
+    return ((client.get("class") == "gliff" and title.startswith("omarchy-vm "))
+            or (client.get("class") == "remote-viewer" and title.startswith("Omarchy VM")))
+
+
 def focus(address):
     run(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:'+address+'" })'], 3)
 
@@ -326,10 +333,12 @@ def guide(machine):
     return ("Omachines connection guide: " + machine["name"] + "\n\n"
             "Guest commands (one command as the guest user): " + c["ssh"] + " '<command>'\n"
             "Guest desktop MCP (Cua Driver, stdio): " + c["cua"] + "\n"
-            "VM control (status, start, stop, view, backups): " + c["control"] + "\n\n"
+            "VM control (status, start --wait, stop, view, screenshot, backups): " + c["control"] + "\n"
+            "Plain SSH, scp and rsync: ssh omarchy-vm (port forwards: ssh -N -L PORT:localhost:PORT omarchy-vm)\n\n"
             "Configure these existing commands in your chosen agent; no passwords belong in MCP settings.\n"
             "The guest signs in to Hyprland automatically and does not idle-lock. Desktop tools need that session;\n"
-            "check it in the Agents section before GUI work.\n"
+            "check it in the Agents section before GUI work. Guest commands get that session's environment.\n"
+            "Cua Driver runs in the guest: give it guest paths (~/Shared), not paths on this host.\n"
             "Agents get passwordless sudo inside the guest. That is root in the VM only, not on this host,\n"
             "but they can read and write the shared folder " + machine["sharedPath"] + " (~/Shared in the guest)\n"
             "and use any accounts signed in inside the guest.\n")
@@ -339,7 +348,7 @@ def perform(action, config, parameters, machine):
     from operations import record, say
     ctl = control(machine)
     if action == "open":
-        windows = hypr_windows(lambda c: c.get("class") == "remote-viewer" and str(c.get("title", "")).startswith("Omarchy VM"))
+        windows = hypr_windows(viewer_window)
         if windows:
             focus(windows[0])
             return "Omarchy VM viewer focused"
