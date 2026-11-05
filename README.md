@@ -13,7 +13,9 @@ already be configured. A VM creation wizard and arbitrary providers are future w
 Click **VM** on the bar. The label adds a logo for each running VM (the Windows
 logo, or the Arch logo for the Omarchy VM) and the tooltip lists every machine.
 Right-click opens or focuses the selected machine; middle-click checks connections.
-Closing a viewer keeps its VM running. Opening Windows counts as an operation until
+Closing a viewer keeps its VM running. The Omarchy VM opens in gliff, Omarchy's remote
+desktop over SSH, once its desktop has signed in, and in the SPICE viewer before that
+(`omarchy-vm view` chooses; Omachines focuses either). Opening Windows counts as an operation until
 its viewer appears: approve or cancel the authorization prompt. A prompt left
 unanswered for 10 minutes is withdrawn, so it can never start Windows after a later
 shutdown or backup.
@@ -44,7 +46,7 @@ Actual restore also requires typing the selected backup identity in its terminal
 
 ## Install and update
 
-Tested on Omarchy 4.0.6 with its Quickshell shell, Python 3, Docker and an existing
+Tested on Omarchy 4.0.6 and 4.5.0 with its Quickshell shell, Python 3, Docker and an existing
 Omarchy Windows VM using protected storage mounts, plus an Omarchy VM run by
 `~/.local/bin/omarchy-vm` (QEMU/KVM as a systemd user unit). The Omarchy VM
 appears only when that command exists. No pip/npm packages, separate web server,
@@ -182,7 +184,9 @@ and leaves at least 4 GiB of host RAM.
 
 The connection guide names each machine's existing bridges. For the Omarchy VM,
 `omarchy-vm-ssh '<command>'` runs a command in the guest and `omarchy-vm-mcp` is
-Cua Driver's stdio MCP in its auto-signed-in Hyprland session. Agents get
+Cua Driver's stdio MCP in its auto-signed-in Hyprland session; `ssh omarchy-vm` also
+works for scp, rsync and port forwards when `~/.ssh/config` includes the VM's settings.
+Agents get
 passwordless sudo inside that guest (not on the host) and can read and write the
 shared folder `~/OmarchyVM` (`~/Shared` in the guest). Checks report SSH, the
 desktop session and Cua health; they never start an agent task.

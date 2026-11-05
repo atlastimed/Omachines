@@ -674,9 +674,17 @@ class OperationTests(Base):
         run.assert_called_once_with(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xabc" })'], 3)
         popen.assert_not_called()
 
+    def test_open_focuses_a_gliff_viewer_on_the_vm_tab_only(self):
+        self.assertTrue(omarchy.viewer_window({"class": "gliff", "title": "omarchy-vm — Gliff"}))
+        self.assertTrue(omarchy.viewer_window({"class": "remote-viewer", "title": "Omarchy VM (1)"}))
+        self.assertFalse(omarchy.viewer_window({"class": "gliff", "title": "devbox — Gliff"}))
+        self.assertFalse(omarchy.viewer_window({"class": "gliff", "title": "omarchy-vm2 — Gliff"}))
+        self.assertFalse(omarchy.viewer_window({"class": "chromium", "title": "omarchy-vm — Gliff"}))
+
     def test_connection_guide_names_bridges_and_guest_sudo(self):
         text = omarchy.guide(machines.omarchy_machine())
-        for value in ("omarchy-vm-ssh", "omarchy-vm-mcp", "passwordless sudo", "not on this host", "OmarchyVM"):
+        for value in ("omarchy-vm-ssh", "omarchy-vm-mcp", "passwordless sudo", "not on this host", "OmarchyVM",
+                      "ssh omarchy-vm", "guest paths"):
             self.assertIn(value, text)
 
 
