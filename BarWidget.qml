@@ -66,17 +66,16 @@ Panel {
       visible: button.composed
       anchors.centerIn: parent
       spacing: Style.space(4)
-      scale: button.pressScale
+      scale: button.pressScale !== undefined ? button.pressScale : 1
       Repeater {
         model: button.composed ? button.icons : []
-        delegate: OpticalGlyph {
+        delegate: BarGlyph {
           required property string modelData
           width: root.barTokens.iconCanvas
           height: root.barTokens.iconCanvas
           text: modelData
           fontFamily: button.fontFamily
           fontSize: root.barTokens.iconFont
-          paintedSize: root.barTokens.iconSize
           color: button.foreground
         }
       }
