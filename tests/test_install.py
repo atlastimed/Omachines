@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 from contextlib import redirect_stdout
 import io
 import json

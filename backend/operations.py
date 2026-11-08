@@ -219,13 +219,21 @@ def open_windows(launcher):
 RESTART_DOWN = 120   # seconds Windows may take to go down after a restart request
 RESTART_UP = 300     # and to answer over SSH again
 UPDATE_LIMIT = 4*3600
+UPDATE_SILENCE = 600 # seconds Windows may stay silent; an update never restarts it by itself
 UPDATE_SCRIPT = r"C:\OEM\Omachines\maintain.ps1"
 UPDATE_TASK = "Omachines-Maintenance"
 UPDATE_STAGES = {"starting":"Starting the update","windows-update":"Installing Windows updates; this can take a while",
                  "apps":"Updating apps with winget","runtimes":"Updating Rust and mise tools",
                  "cua":"Updating Cua Driver","aside":"Updating Aside",
                  "cleanup":"Cleaning up old Windows components","finished":"Finishing the update"}
-# Fails when Windows is not signed in: the task needs the user's own session.
+# The task runs elevated, so what it runs must not be writable by unelevated
+# programs. A folder under C:\ inherits "Authenticated Users: Modify"; this one
+# drops that before the script arrives, and the task exists only during a run.
+UPDATE_INSTALL = r"""$folder='C:\OEM\Omachines'
+New-Item -ItemType Directory -Force $folder | Out-Null
+& icacls.exe $folder /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+if($LASTEXITCODE){exit 1}
+$in=[Console]::OpenStandardInput();$out=[IO.File]::Create('%s');$in.CopyTo($out);$out.Close()"""
 UPDATE_START = r"""$ErrorActionPreference='Stop'
 if((Get-ScheduledTask -TaskName '%(task)s' -ErrorAction SilentlyContinue).State -eq 'Running'){throw 'running'}
 Remove-Item 'C:\OEM\Omachines\maintenance.json' -ErrorAction SilentlyContinue
@@ -234,9 +242,12 @@ $principal=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interacti
 $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName '%(task)s' -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName '%(task)s'"""
-UPDATE_READ = r"Get-Content -Raw 'C:\OEM\Omachines\maintenance.json' -ErrorAction SilentlyContinue"
-UPDATE_INSTALL = r"""New-Item -ItemType Directory -Force C:\OEM\Omachines | Out-Null
-$in=[Console]::OpenStandardInput();$out=[IO.File]::Create('%s');$in.CopyTo($out);$out.Close()"""
+# The task's state first: it writes its last status before it ends, so "not
+# running" next to a "running" status means it died, as in a crash or power cut.
+UPDATE_READ = r"""$task=(Get-ScheduledTask -TaskName '%s' -ErrorAction SilentlyContinue).State
+"task=$task"
+Get-Content -Raw 'C:\OEM\Omachines\maintenance.json' -ErrorAction SilentlyContinue""" % UPDATE_TASK
+UPDATE_END = r"Unregister-ScheduledTask -TaskName '%s' -Confirm:$false -ErrorAction SilentlyContinue" % UPDATE_TASK
 
 
 def copy_to_guest(data):
@@ -257,7 +268,7 @@ def parse_update(text, run_id):
         raw=json.loads(text)
     except ValueError:
         return None
-    if not isinstance(raw,dict) or raw.get("runId")!=run_id or raw.get("status") not in ("running","complete","failed"):
+    if not isinstance(raw,dict) or raw.get("runId")!=run_id or raw.get("status") not in ("running","complete","partial","failed"):
         return None
     count=lambda key:raw[key] if type(raw.get(key)) is int and raw[key]>=0 else 0
     return {"status":raw["status"],"stage":raw.get("stage") if raw.get("stage") in UPDATE_STAGES else "",
@@ -268,51 +279,80 @@ def parse_update(text, run_id):
 
 def update_summary(result):
     plural=lambda n,word:f"{n} {word}"+("" if n==1 else "s")
-    text=f"Windows and tools updated: {plural(result['windows'],'Windows update')}, {plural(result['apps'],'app')}"
+    counts=f"{plural(result['windows'],'Windows update')}, {plural(result['apps'],'app')}"
     failed=result["windowsFailed"]+result["appsFailed"]+result["problems"]
-    if failed:
-        text+=f"; {plural(failed,'item')} did not update, see C:\\OEM\\Omachines\\maintenance.log in Windows"
+    text=(f"Update finished with problems: {counts}; {plural(failed,'item')} did not update, "
+          "see C:\\OEM\\Omachines\\maintenance.log in Windows") if failed else f"Windows and tools updated: {counts}"
     return text+("; restart Windows to finish" if result["reboot"] else "")
 
 
+def follow_update(run_id):
+    # No connection is held meanwhile: an update can restart the SSH server.
+    started=contact=time.monotonic()
+    stage,gone="",0
+    while time.monotonic()-started<UPDATE_LIMIT:
+        if stopping:
+            raise OperationError("The update continues in Windows; Omachines stopped following it")
+        time.sleep(update_poll())
+        try:
+            state,_,rest=guest_powershell(UPDATE_READ,20).partition("\n")
+        except OperationError:
+            if time.monotonic()-contact>UPDATE_SILENCE:
+                raise OperationError("Windows stopped answering during the update; check it before retrying") from None
+            continue
+        contact=time.monotonic()
+        result=parse_update(rest,run_id)
+        if result and result["stage"] and result["stage"]!=stage:
+            stage=result["stage"]
+            record("update","running",UPDATE_STAGES[stage])
+        if result and result["status"]=="failed":
+            raise OperationError("The update stopped early; see C:\\OEM\\Omachines\\maintenance.log in Windows")
+        if result and result["status"] in ("complete","partial"):
+            return update_summary(result)
+        gone=0 if state.strip() in ("task=Running","task=Queued") else gone+1
+        if gone>=2:
+            raise OperationError("The update stopped before it finished; check that Windows is signed in and run it again")
+    raise OperationError("The update did not finish within 4 hours; check Windows before retrying")
+
+
 def update_windows():
-    # The task runs in Windows and outlives this worker; a stop request only
-    # stops the following, never the update. No connection is held meanwhile,
-    # because updates can restart the guest's SSH server or PowerShell.
+    # The task runs in Windows and outlives this worker: a stop request only
+    # stops the following, never the update.
     run_id=uuid.uuid4().hex[:12]
     record("update","running","Copying the update script into Windows")
-    copy_to_guest((ROOT/"backend/guest-maintain.ps1").read_bytes())
-    try:
-        guest_powershell(UPDATE_START%{"task":UPDATE_TASK,"script":UPDATE_SCRIPT,"run":run_id},30)
-    except OperationError:
-        raise OperationError("Windows did not start the update; one may already be running, or sign in to Windows first") from None
-    record("update","running",UPDATE_STAGES["starting"])
-    deadline,seen_at,stage=time.monotonic()+UPDATE_LIMIT,time.monotonic(),""
     with providing_work():
-        while time.monotonic()<deadline:
-            if stopping:
-                return "The update continues in Windows; Omachines stopped following it"
-            time.sleep(update_poll())
-            try:
-                result=parse_update(guest_powershell(UPDATE_READ,20),run_id)
-            except OperationError:
-                continue
-            if result is None:
-                if time.monotonic()-seen_at>180 and not stage:
-                    raise OperationError("Windows did not start the update; sign in to Windows and try again")
-                continue
-            if result["stage"] and result["stage"]!=stage:
-                stage=result["stage"]
-                record("update","running",UPDATE_STAGES[stage])
-            if result["status"]=="failed":
-                raise OperationError("The update stopped early; see C:\\OEM\\Omachines\\maintenance.log in Windows")
-            if result["status"]=="complete":
-                return update_summary(result)
-    raise OperationError("The update did not finish within 4 hours; check Windows before retrying")
+        copy_to_guest((ROOT/"backend/guest-maintain.ps1").read_bytes())
+        try:
+            guest_powershell(UPDATE_START%{"task":UPDATE_TASK,"script":UPDATE_SCRIPT,"run":run_id},30)
+        except OperationError:
+            raise OperationError("Windows did not start the update; one may already be running, or sign in to Windows first") from None
+        record("update","running",UPDATE_STAGES["starting"])
+        finished=True
+        try:
+            return follow_update(run_id)
+        except OperationError as error:
+            # Only a task that may still be working stays registered.
+            finished="continues" not in str(error) and "stopped answering" not in str(error)
+            raise
+        finally:
+            if finished:
+                try:
+                    guest_powershell(UPDATE_END,20)
+                except OperationError:
+                    pass
 
 
 def update_poll():
     return 10
+
+
+def guest_boot():
+    # When Windows last started, or "" if it cannot say right now.
+    try:
+        text=guest_powershell("(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",15)
+    except OperationError:
+        return ""
+    return text if re.fullmatch(r"[0-9T:.+\-Z]{10,40}",text) else ""
 
 
 def restart_windows():
@@ -324,24 +364,31 @@ def restart_windows():
     record("restart","running","Restarting Windows")
     # The restart ends the RDP session, and with it the viewer.
     reopen=wrapper("windows-vm-launch") if viewer_windows() else None
-    # A restart needs no root: it stays inside the guest, and the VM keeps running.
-    run([ssh,'shutdown.exe /r /t 2 /d p:0:0 /c "Requested by Omachines"'],20)
     with providing_work():
-        for answering,limit,failure in ((False,RESTART_DOWN,"Windows did not begin restarting; an open app may be blocking it"),
-                                        (True,RESTART_UP,"Windows did not come back after restarting; check the recovery console")):
-            deadline=time.monotonic()+limit
-            while ssh_banner()!=answering:
-                if stopping:
-                    return "Windows is restarting; Omachines stopped following it"
-                if time.monotonic()>deadline:
-                    raise OperationError(failure)
-                time.sleep(restart_poll())
-            if answering:
+        before=guest_boot()
+        if not before:
+            raise OperationError("Windows did not report when it started; nothing was restarted")
+        # A restart needs no root: it stays inside the guest, and the VM keeps running.
+        run([ssh,'shutdown.exe /r /t 2 /d p:0:0 /c "Requested by Omachines"'],20)
+        started,down=time.monotonic(),False
+        while True:
+            if stopping:
+                raise OperationError("Windows is restarting; Omachines stopped following it")
+            # Only a new start time proves the restart: a busy guest can miss
+            # one probe, and Windows answers until the restart really begins.
+            boot=guest_boot() if ssh_banner() else ""
+            if boot and boot!=before:
                 if reopen:
                     subprocess.Popen([reopen],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
                     return "Windows restarted; viewer reopened"
                 return "Windows restarted"
-            record("restart","running","Windows is restarting")
+            if not boot and not down:
+                down=True
+                record("restart","running","Windows is restarting")
+            if time.monotonic()-started>(RESTART_UP if down else RESTART_DOWN):
+                raise OperationError("Windows did not come back after restarting; check the recovery console" if down else
+                                     "Windows did not begin restarting; an open app may be blocking it")
+            time.sleep(restart_poll())
 
 
 def restart_poll():

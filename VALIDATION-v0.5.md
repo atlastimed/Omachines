@@ -3,7 +3,7 @@
 Recorded on 8 November 2026 on Omarchy 4.5.0 (Hyprland 0.56.2, three monitors) with
 Windows 11 26H2 build 26300.9711 under dockur 6.06. Host and guest measurements are from
 the real machine. `scripts/check.py` covers the logic: 233 Python tests in a private PID
-namespace, manifest validation, qmllint and 39 native Qt interaction tests.
+and network namespace, manifest validation, qmllint and 39 native Qt interaction tests.
 
 ## Incident during this work
 
@@ -15,8 +15,9 @@ process of the user (journal: all at 12:55:40.325, then the user service manager
 `killpg(1, SIGTERM)` then `killpg(1, SIGKILL)`, and nothing once fixed. The user had to
 power the PC off, which cut Windows off during an update.
 
-Fixes: `probes.signal_group` refuses anything but a real child's pid, and `check.py` seals
-the tests away from the session. Sealing also showed that five tests had been passing only
+Fixes: `probes.signal_group` refuses anything but a real child's pid, `probes.Process`
+refuses a fake pid, `check.py` seals the tests away from the session, and `tests/sealed.py`
+refuses a direct run on the desktop. Sealing also showed that five tests had been passing only
 because they reached the live Windows SSH port.
 
 Windows after that power cut: event 41 as expected, NTFS healthy and not dirty,
@@ -33,10 +34,27 @@ The update had finished all six winget apps first, because the VM outlived the s
 | Viewer minimized to the dock | Open brought it back to the active workspace and focused it. |
 | Close viewer | Desktop returned to the console for agents. |
 | Restart | 21 s without a viewer. With one open, it reopened 17 s after the request. Cua read `error` on a check right at the end of the restart and `ready` on the next one, moments later. |
-| Update action | Copied the script and showed each stage. The first run updated six winget apps but lost power in its cleanup stage. The second, with nothing left to do, finished cleanly with counts in 60 s, so no run has yet both changed things and reported them. |
+| Update action | Copied the script and showed each stage. The first run updated six winget apps but lost power in its cleanup stage. Later runs had nothing left to do and finished with correct zero counts, so no run has yet both changed things and reported them. Afterwards the elevated task is gone. |
 | Aside | Open Aside works on Cua 0.43.2; browser tools respond; CLI signed in; components at 1.26.1107.24. |
 | Host shutdown wait | `systemctl stop docker` with Windows running: Windows logged 1074, 6006 and 109, no event 41 or 6008 on the next boot, not dirty. Took 4 s idle; one earlier stop took 40 s. |
 | Panel | Opened from the real bar: Windows logo, machine switcher, version and update rows, new actions. |
+
+## Independent review
+
+A fresh reviewer read the change without running anything. Fixed from its findings:
+
+- An update could hold the panel's lock for up to 4 hours after a guest crash. It now
+  notices a dead task within two polls, and a guest silent for 10 minutes.
+- "Windows restarted" could follow one missed probe. It now needs a new start time.
+- A failed update could report success. It now ends as `partial`, worded as problems, and
+  a program that cannot start counts as failed.
+- `C:\\OEM`, including scripts run elevated, was writable by any signed-in user, which also
+  applied to the elevated update task. The folder is now locked and the task removed after
+  each run. Part of this predates version 0.5.
+- The tests kept the network and part of the session's environment, and could be started
+  directly. They now have no network, a fixed environment and a refusal on the desktop.
+
+It found no way to widen the polkit rule.
 
 ## Measurements behind decisions
 

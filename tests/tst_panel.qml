@@ -370,6 +370,7 @@ Window {
       compare(Model.updateLine({guest:{updateStatus:"running"}},0),"Updating now")
       compare(Model.updateLine({guest:{rebootPending:true,updateStatus:"complete",updatedAt:"2026-01-01T00:00:00Z"}},0),"Restart Windows to finish updating")
       compare(Model.updateLine({guest:{updateStatus:"failed"}},0),"The last update stopped early")
+      compare(Model.updateLine({guest:{updateStatus:"partial",updatedAt:"2026-01-01T00:00:00Z"}},0),"The last update had problems; see its log in Windows")
       compare(Model.updateLine({guest:{}},0),"Not updated through Omachines yet")
       compare(Model.updateLine({guest:{updatedAt:"2026-01-01T00:00:00Z"}},Date.parse("2026-01-01T02:00:00Z")),"Updated 2 h ago")
     }

@@ -30,6 +30,8 @@ function Problem([string]$text) { $state.problems += $text; Log "PROBLEM $text";
 # Through Add-Content: a redirection would append UTF-16 to this UTF-8 log.
 function Invoke-Logged([string]$file, [string[]]$arguments) {
   Log "> $file $($arguments -join ' ')"
+  # Stays -1 if the program cannot even start, which sets no exit code.
+  $global:LASTEXITCODE = -1
   & $file @arguments 2>&1 | ForEach-Object { "$_" } | Add-Content -Encoding UTF8 $logPath
   return $LASTEXITCODE
 }
@@ -145,6 +147,7 @@ function Update-Aside {
     # This session can follow the updater's junction, unlike elevated SSH.
     # The CLI asks before installing, and has no flag to skip the question.
     Log "> $cli update"
+    $global:LASTEXITCODE = -1
     'y' | & $cli update 2>&1 | ForEach-Object { "$_" } | Add-Content -Encoding UTF8 $logPath
     if ($LASTEXITCODE -ne 0) { Problem 'Aside CLI did not update' }
     $state.versions.asideCli = ((& $cli --version) -join ' ').Trim()
@@ -167,7 +170,7 @@ try {
   Update-Aside
   if (-not $SkipCleanup) { Clean-Up }
   if (Reboot-Pending) { $state.rebootRequired = $true }
-  $state.status = 'complete'
+  $state.status = if ($state.problems.Count -or $state.windowsFailed -or $state.appsFailed) { 'partial' } else { 'complete' }
 } catch {
   Problem 'Maintenance stopped early'
   Log $_.Exception.Message

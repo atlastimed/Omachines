@@ -134,7 +134,9 @@ does not cover `write_compose`, `remove`, backup, restore or allocation.
 `--revoke-windows-start` removes it.
 
 **Update Windows and tools** runs a script from this release as a scheduled task with
-your Windows account's highest privileges, and installs what Windows Update, winget,
+your Windows account's highest privileges. Its folder `C:\OEM\Omachines` is writable only
+by administrators, set before the script is copied there, and the task exists only during
+a run, so an unelevated program cannot use it to gain those privileges. It installs what Windows Update, winget,
 rustup, mise, Cua and Aside publish. Cua's installer checks its checksums and Authenticode
 signature. Treat an update like installing those programs by hand: back up first if you
 want a way back. Guest output is reduced to known stages and counts before it reaches the
@@ -148,5 +150,7 @@ The viewer gives Windows no microphone unless `~/.config/windows/viewer.conf` sa
 Backend code signals process groups only through `probes.signal_group`, which refuses
 anything but a real child's pid: `killpg(1)` is `kill(-1)`, every process you own. On
 8 November 2026 a test whose mocked pid reached `os.killpg` killed the desktop session
-running it. `scripts/check.py` therefore runs the Python tests in a private PID namespace,
-without the session's variables or your home. Run them through it, not directly.
+running it. `scripts/check.py` therefore runs the Python tests in private PID and network
+namespaces, with a fixed environment and a temporary home, and `tests/sealed.py` stops them
+starting on a live desktop any other way. `probes.Process` refuses a process with a fake pid
+before touching its descriptors.

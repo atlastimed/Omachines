@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 import json
 import os
 from pathlib import Path

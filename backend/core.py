@@ -124,7 +124,7 @@ def ssh_banner(port=2222):
         return False
 
 
-SSH_TRUST = 120  # seconds a seen banner vouches for an open port
+SSH_TRUST = 60   # seconds a seen banner vouches for an open port
 _ssh_seen = None
 
 
@@ -172,7 +172,7 @@ def parse_guest(raw):
     os_version = raw.get("osVersion")
     result["osVersion"] = os_version if isinstance(os_version, str) and re.fullmatch(r"[0-9A-Za-z]{2,8} build \d{4,6}\.\d{1,6}", os_version) else ""
     result["rebootPending"] = raw.get("rebootPending") is True
-    result["updateStatus"] = raw.get("updateStatus") if raw.get("updateStatus") in ("running", "complete", "failed") else ""
+    result["updateStatus"] = raw.get("updateStatus") if raw.get("updateStatus") in ("running", "complete", "partial", "failed") else ""
     finished = raw.get("updatedAt")
     result["updatedAt"] = finished if isinstance(finished, str) and re.fullmatch(r"[0-9T:.+\-Z]{10,40}", finished) else ""
     return result
@@ -441,11 +441,17 @@ def sample_state():
             "operation":{},"demo":True,"viewerOpen":False,"storage":{"availableBytes":107374182400},"sharedPath":"~/Windows"}
 
 
+def forget_ssh():
+    global _ssh_seen
+    _ssh_seen = None
+
+
 def windows_reachability(op):
     # Published ports exist exactly while the container runs. Windows itself is
     # up once its sshd answers; until then it is starting.
     if tcp(2222) or tcp(8006):
         return ("running", "Windows is reachable") if ssh_answering() else ("starting", "Windows is starting")
+    forget_ssh()  # stopped: the next start must prove itself again
     op = last_operation(op, "windows")
     if op.get("action") == "backup" and op.get("status") in ("starting", "running"):
         return "unreachable", "Backup in progress"
@@ -509,6 +515,7 @@ def collect_windows(config, deep=False, previous=None):
         s["checks"]["desktop"]=check(guest["desktop"],messages[guest["desktop"]])
         s["summary"] = "Windows is ready" if guest["desktop"]=="available" else messages[guest["desktop"]]
     except (OperationError, ValueError, OSError):
+        forget_ssh()
         s["checks"]["ssh"]=check("error","SSH did not respond. Check the connection or recovery console.")
         s["checks"]["desktop"]=check("unknown","Desktop state unavailable")
         return s

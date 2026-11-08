@@ -1,4 +1,5 @@
 """Recovery fixtures never call Docker, sudo, or touch a real VM."""
+import sealed  # refuses a direct run on the desktop
 from contextlib import nullcontext
 import fcntl
 import io

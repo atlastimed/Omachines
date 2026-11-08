@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 import importlib.machinery
 import json
 import os

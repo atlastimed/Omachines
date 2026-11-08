@@ -78,6 +78,10 @@ class Process:
                                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                              start_new_session=True, bufsize=0)
                 _active.add(self)
+            # A mocked Popen would hand out fake descriptors and a fake pid,
+            # which convert to 1: this process's real stdout and every process.
+            if type(self.proc.pid) is not int:
+                raise ProbeError("Not a real process")
             os.set_blocking(self.proc.stdout.fileno(), False)
             if stdin:
                 os.set_blocking(self.proc.stdin.fileno(), False)

@@ -2,6 +2,7 @@
 
 Fixtures never run omarchy-vm, SSH, sudo or Docker, and never touch a real VM.
 """
+import sealed  # refuses a direct run on the desktop
 from contextlib import redirect_stdout
 import importlib.machinery
 import importlib.util
@@ -132,7 +133,7 @@ class RegistryTests(Base):
         self.assertEqual(machines.get("omarchy")["connections"], machines.omarchy_machine()["connections"])
         self.assertNotIn("evil", self.registry.read_text())
         self.assertEqual(json.loads(self.registry.read_text())["selected"], "windows")
-        with patch("omarchy.run", side_effect=fake_run()) as run:
+        with patch("omarchy.run", side_effect=fake_run()) as run, patch("core.Client", side_effect=OSError), patch("core.tcp", return_value=False):
             core.collect(core.settings(), deep=True, machine_id="omarchy")
         self.assertTrue(run.call_args_list)
         self.assertTrue(all("evil" not in c.args[0][0] for c in run.call_args_list))

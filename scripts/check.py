@@ -20,15 +20,17 @@ def run(*args,**kwargs):
 
 env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'}
 # The tests start processes and send signals. On 8 November 2026 a mocked pid
-# reached kill(-1) and killed the desktop session running them. In its own PID
-# namespace a test can signal only the suite, and without the session's variables
-# or the real home it cannot reach Hyprland, D-Bus or the VM wrappers.
-SEAL=['unshare','--user','--map-current-user','--pid','--fork','--kill-child','--mount-proc']
-if subprocess.run([*SEAL,'true'],capture_output=True).returncode:
-    raise SystemExit('Refusing to run the tests: this system does not allow a private PID namespace (unshare).')
+# reached kill(-1) and killed the desktop session running them. In private PID and
+# network namespaces a test can signal only the suite and reach only its own
+# loopback; with a fixed environment and a temporary home it cannot reach Hyprland,
+# D-Bus, an SSH agent or the VM wrappers. tests/sealed.py refuses any other way in.
+SEAL=['unshare','--user','--map-current-user','--keep-caps','--net','--pid','--fork','--kill-child','--mount-proc',
+      '/usr/bin/sh','-c','/usr/bin/ip link set lo up && exec "$@"','sealed']
+if subprocess.run([*SEAL,'/usr/bin/true'],capture_output=True).returncode:
+    raise SystemExit('Refusing to run the tests: this system does not allow private namespaces (unshare).')
 with tempfile.TemporaryDirectory(prefix='omachines-test-home-') as home:
-    sealed={k:v for k,v in env.items() if k not in ('HYPRLAND_INSTANCE_SIGNATURE','WAYLAND_DISPLAY','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR','XDG_STATE_HOME','XDG_CONFIG_HOME')}
-    run(*SEAL,sys.executable,'-m','unittest','discover','-s','tests','-v',env={**sealed,'HOME':home})
+    kept={k:env[k] for k in ('PATH','LANG','PYTHONDONTWRITEBYTECODE','TMPDIR') if k in env}
+    run(*SEAL,sys.executable,'-m','unittest','discover','-s','tests','-v',env={**kept,'HOME':home})
 run('omarchy','plugin','validate',ROOT)
 with tempfile.TemporaryDirectory(prefix='omachines-qt-') as tmp:
     imports=Path(tmp)

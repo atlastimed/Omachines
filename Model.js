@@ -112,6 +112,7 @@ function updateLine(state, now) {
   if (guest.updateStatus === "running") return "Updating now"
   if (guest.rebootPending) return "Restart Windows to finish updating"
   if (guest.updateStatus === "failed") return "The last update stopped early"
+  if (guest.updateStatus === "partial") return "The last update had problems; see its log in Windows"
   return guest.updatedAt ? "Updated " + ago(guest.updatedAt, now).toLowerCase() : "Not updated through Omachines yet"
 }
 // Omarchy gives system services 5 seconds to stop, too short for Windows to

@@ -13,7 +13,8 @@ Read README.md and PLAN.md. This is a native Omarchy plugin for existing VMs
 - Use one shared service across monitors, theme-native controls and bounded
   probes. Readiness is not agent activity. State may be stale or unknown.
 - Run the tests only through `scripts/check.py`, never `python -m unittest` on the
-  desktop. It seals them in a private PID namespace, because a mocked pid once
+  desktop (`tests/sealed.py` refuses it; new test files must import it first). It seals
+  them in private PID and network namespaces, because a mocked pid once
   reached `kill(-1)` and killed the whole desktop session. Mocking
   `<module>.subprocess.Popen` mocks it everywhere; signal only via `signal_group`.
 - Run `python3 scripts/check.py` on Omarchy. It includes actual Qt interaction
