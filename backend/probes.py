@@ -38,6 +38,15 @@ def _shutdown_signal(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+def signal_group(pid, sig):
+    # killpg(1) is kill(-1), which signals every process this user owns, and
+    # killpg(0) is the caller's own group. Only a real child's pid may get here:
+    # a mocked one converts to 1. Refused like a process that has already gone.
+    if type(pid) is not int or pid <= 1:
+        raise ProcessLookupError(f"Refusing to signal process group {pid!r}")
+    os.killpg(pid, sig)
+
+
 def close_all():
     global _closing
     with _lock:
@@ -85,13 +94,13 @@ class Process:
             # Reap only after killing remaining group members. A promptly
             # exiting leader must not spare a descendant that ignores TERM.
             try:
-                os.killpg(self.proc.pid, signal.SIGTERM)
+                signal_group(self.proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             else:
                 time.sleep(0.1)
                 try:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
+                    signal_group(self.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
             try:

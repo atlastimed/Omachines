@@ -73,13 +73,18 @@ function Update-Apps {
   [void](Invoke-Logged $winget (@('source', 'update', '--disable-interactivity')))
   # winget updates itself first: replacing App Installer ends the running copy.
   [void](Invoke-Logged $winget (@('upgrade', '--id', 'Microsoft.AppInstaller', '--exact', '--source', 'winget') + $common))
-  $before = (Get-Item $logPath).Length
-  $code = Invoke-Logged $winget (@('upgrade', '--all') + $common)
-  $reader = [IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
-  try {
-    [void]$reader.Seek($before, 'Begin')
-    $text = (New-Object IO.StreamReader($reader)).ReadToEnd()
-  } finally { $reader.Close() }
+  # Right after that, the first call can fail with "Unrecognized command".
+  foreach ($attempt in 1, 2) {
+    $before = (Get-Item $logPath).Length
+    $code = Invoke-Logged $winget (@('upgrade', '--all') + $common)
+    $reader = [IO.File]::Open($logPath, 'Open', 'Read', 'ReadWrite')
+    try {
+      [void]$reader.Seek($before, 'Begin')
+      $text = (New-Object IO.StreamReader($reader)).ReadToEnd()
+    } finally { $reader.Close() }
+    if ($text -notmatch 'Unrecognized command') { break }
+    Start-Sleep 10
+  }
   $state.apps = ([regex]::Matches($text, 'Successfully installed')).Count
   $state.appsFailed = ([regex]::Matches($text, 'Installer failed|Installation failed|failed to upgrade')).Count
   # -1978335189: no applicable upgrade.

@@ -14,6 +14,8 @@ import operations
 
 class CoreTests(unittest.TestCase):
     def setUp(self):
+        answering=patch('core.ssh_answering',side_effect=lambda:core.tcp(2222))
+        answering.start();self.addCleanup(answering.stop)
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)
         self.env=patch.dict(os.environ,{'XDG_STATE_HOME':str(self.path)})
@@ -150,9 +152,9 @@ class CoreTests(unittest.TestCase):
             launch.assert_called_once()
 
     def test_focus_existing_viewer_no_duplicate(self):
-        with patch('operations.viewer_windows',return_value=['0x123']),patch('operations.run') as run,patch('operations.subprocess.Popen') as launch:
+        with patch('operations.viewer_windows',return_value=['0x123']),patch('operations.focus_window') as focus,patch('operations.subprocess.Popen') as launch:
             operations.perform('open',{})
-        run.assert_called_once_with(['hyprctl','dispatch','hl.dsp.focus({ window = "address:0x123" })'],3)
+        focus.assert_called_once_with('0x123')
         launch.assert_not_called()
 
     def test_diagnostic_excludes_private_fields(self):

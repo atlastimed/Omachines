@@ -11,6 +11,10 @@ Read README.md and PLAN.md. This is a native Omarchy plugin for existing VMs
   Read-only probes of a running VM (`omarchy-vm status --json`) are fine.
 - Use one shared service across monitors, theme-native controls and bounded
   probes. Readiness is not agent activity. State may be stale or unknown.
+- Run the tests only through `scripts/check.py`, never `python -m unittest` on the
+  desktop. It seals them in a private PID namespace, because a mocked pid once
+  reached `kill(-1)` and killed the whole desktop session. Mocking
+  `<module>.subprocess.Popen` mocks it everywhere; signal only via `signal_group`.
 - Run `python3 scripts/check.py` on Omarchy. It includes actual Qt interaction
   tests using an isolated offscreen Quickshell runtime. Record separate physical
   desktop evidence. No extra long-running shell instance or web UI.

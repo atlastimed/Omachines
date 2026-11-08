@@ -189,6 +189,17 @@ def hypr_windows(match):
         return []
 
 
+def focus_window(address):
+    # Omarchy 4.5 keeps a window minimized to its dock on this workspace, and
+    # the dock brings it back to the workspace in front of the user.
+    clients = json.loads(run(["hyprctl", "clients", "-j"], 3))
+    client = next((c for c in clients if isinstance(c, dict) and c.get("address") == address), {})
+    if (client.get("workspace") or {}).get("name") == "special:minimized":
+        here = json.loads(run(["hyprctl", "activeworkspace", "-j"], 3)).get("id")
+        run(["hyprctl", "dispatch", 'hl.dsp.window.move({ workspace = "%d", window = "address:%s" })' % (int(here), address)], 3)
+    run(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:' + address + '" })'], 3)
+
+
 def viewer_windows():
     return hypr_windows(lambda c: c.get("class") in ("xfreerdp", "wlfreerdp") and c.get("title") == "Windows VM - Omarchy")
 

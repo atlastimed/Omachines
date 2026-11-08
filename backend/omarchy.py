@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 
-from core import (OperationError, carried_checks, check, cua_check, fresh_checks, hypr_windows, machine_operation,
+from core import (OperationError, carried_checks, check, cua_check, focus_window, fresh_checks, hypr_windows, machine_operation,
                   now, operation, read_json, run, state_dir, write_json)
 
 BACKUP_ID = re.compile(r"omarchy-\d{8}T\d{6}Z")
@@ -324,10 +324,6 @@ def viewer_window(client):
             or (client.get("class") == "remote-viewer" and title.startswith("Omarchy VM")))
 
 
-def focus(address):
-    run(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:'+address+'" })'], 3)
-
-
 def guide(machine):
     c = machine["connections"]
     return ("Omachines connection guide: " + machine["name"] + "\n\n"
@@ -350,7 +346,7 @@ def perform(action, config, parameters, machine):
     if action == "open":
         windows = hypr_windows(viewer_window)
         if windows:
-            focus(windows[0])
+            focus_window(windows[0])
             return "Omarchy VM viewer focused"
         record(action, "running", "Starting Omarchy VM and opening its viewer")
         stream(action, [ctl, "view"], "The viewer could not be opened")

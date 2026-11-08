@@ -669,9 +669,9 @@ class OperationTests(Base):
 
     def test_open_focuses_existing_viewer_without_view(self):
         machine = machines.omarchy_machine()
-        with patch("omarchy.hypr_windows", return_value=["0xabc"]), patch("omarchy.run") as run, patch("omarchy.subprocess.Popen") as popen:
+        with patch("omarchy.hypr_windows", return_value=["0xabc"]), patch("omarchy.focus_window") as focus, patch("omarchy.subprocess.Popen") as popen:
             self.assertEqual(omarchy.perform("open", self.config, {}, machine), "Omarchy VM viewer focused")
-        run.assert_called_once_with(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xabc" })'], 3)
+        focus.assert_called_once_with("0xabc")
         popen.assert_not_called()
 
     def test_open_focuses_a_gliff_viewer_on_the_vm_tab_only(self):

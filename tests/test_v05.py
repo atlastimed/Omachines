@@ -5,6 +5,7 @@ Fixtures never run SSH, Docker, pkexec or sudo, and never touch a real VM.
 import json
 from pathlib import Path
 import re
+import signal
 import socket
 import sys
 import tempfile
@@ -15,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/"backend"))
-import core, machines, operations
+import core, machines, operations, probes
 
 
 PARSE = operations.parse_update
@@ -169,6 +170,55 @@ class RuleTests(unittest.TestCase):
     def test_shutdown_dropin_outlasts_the_containers_grace_period(self):
         timeout = int(re.search(r"\[Service\]\\nTimeoutStopSec=(\d+)", self.source)[1])
         self.assertGreater(timeout, 120+5)
+
+
+class SignalGuardTests(unittest.TestCase):
+    """Patching a module's subprocess.Popen patches it everywhere, and a mocked
+    pid converts to 1. killpg(1) is kill(-1): on 8 November 2026 a test did that
+    and killed the whole desktop session. No signal is really sent here."""
+
+    def test_only_a_real_childs_pid_is_signalled(self):
+        with patch("os.killpg") as killpg:
+            for pid in (MagicMock(), 1, 0, -1, True, None, "42", 42.0):
+                with self.assertRaises(ProcessLookupError):
+                    probes.signal_group(pid, signal.SIGTERM)
+            killpg.assert_not_called()
+            probes.signal_group(4242, signal.SIGTERM)
+            killpg.assert_called_once_with(4242, signal.SIGTERM)
+
+    def test_closing_a_mocked_process_signals_nothing(self):
+        child = probes.Process.__new__(probes.Process)
+        child._close_lock = threading.RLock()
+        child.closed = False
+        child.proc = MagicMock()
+        with patch("os.killpg") as killpg, patch("os.kill") as kill:
+            child.close()
+        killpg.assert_not_called()
+        kill.assert_not_called()
+        self.assertTrue(child.closed)
+
+    def test_no_backend_code_signals_groups_directly(self):
+        for path in [*(ROOT/"backend").glob("*.py"), ROOT/"backend/omachinesctl", ROOT/"install.py"]:
+            code = [line.partition("#")[0] for line in path.read_text().splitlines()]
+            direct = [line for line in code if "killpg(" in line or "os.kill(" in line]
+            self.assertEqual(direct, ["    os.killpg(pid, sig)"] if path.name == "probes.py" else [], path.name)
+
+
+class FocusTests(unittest.TestCase):
+    def calls(self, workspace):
+        clients = json.dumps([{"address": "0xabc", "workspace": {"id": -99, "name": workspace}}])
+        replies = {"clients": clients, "activeworkspace": json.dumps({"id": 7})}
+        with patch("core.run", side_effect=lambda argv, timeout=15: replies.get(argv[1], "")) as run:
+            core.focus_window("0xabc")
+        return [c[0][0][-1] for c in run.call_args_list if c[0][0][1] == "dispatch"]
+
+    def test_plain_window_is_only_focused(self):
+        self.assertEqual(self.calls("3"), ['hl.dsp.focus({ window = "address:0xabc" })'])
+
+    def test_window_minimized_to_the_dock_comes_back_to_this_workspace(self):
+        self.assertEqual(self.calls("special:minimized"),
+                         ['hl.dsp.window.move({ workspace = "7", window = "address:0xabc" })',
+                          'hl.dsp.focus({ window = "address:0xabc" })'])
 
 
 class Worker(unittest.TestCase):

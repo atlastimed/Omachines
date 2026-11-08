@@ -13,11 +13,11 @@ import threading
 import time
 import uuid
 
-from core import (ROOT, OperationError, admission, backups, busy, check, collect, guest_powershell, now, operation,
+from core import (ROOT, OperationError, admission, backups, busy, check, collect, focus_window, guest_powershell, now, operation,
                   quick_lifecycle, read_json, reservation_fresh, run, settings, ssh_banner, state_dir, viewer_windows,
                   windows_reachability, wrapper, write_json)
 from mcp import Client
-from probes import install_shutdown_handlers
+from probes import install_shutdown_handlers, signal_group
 
 ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections", "restart", "update"}
 ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
@@ -206,7 +206,7 @@ def open_windows(launcher):
                 return "Windows viewer opened"
             if time.monotonic()>deadline:
                 # Withdraw the request, including a prompt nobody answered.
-                try:os.killpg(p.pid,signal.SIGTERM)
+                try:signal_group(p.pid,signal.SIGTERM)
                 except ProcessLookupError:pass
                 p.wait()
                 raise OperationError("Windows did not start within 10 minutes; the request was withdrawn")
@@ -539,7 +539,7 @@ def perform(action, config, parameters=None, machine=None):
     if action=="open":
         windows=viewer_windows()
         if windows:
-            run(["hyprctl","dispatch",'hl.dsp.focus({ window = "address:'+windows[0]+'" })'],3)
+            focus_window(windows[0])
             return "Windows viewer focused"
         launcher=wrapper("windows-vm-launch")
         if not launcher:
