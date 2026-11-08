@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 import os
 from pathlib import Path
 import sys
@@ -18,6 +19,7 @@ class ResponseTests(unittest.TestCase):
         self.patch(patch("core.viewer_windows", return_value=[]))
         self.patch(patch("core.backups", return_value=[]))
         self.patch(patch("core.tcp", return_value=True))
+        self.patch(patch("core.ssh_answering", return_value=True))
         self.patch(patch("core.capabilities", return_value={"ssh":True,"cua":True,"aside":False}))
         self.guest = self.patch(patch("core.guest_status", return_value={"desktop":"available","cpu":4}))
         self.patch(patch('core.aside_cli_status',return_value={'installed':True,'version':'1.2.3','authentication':'unknown'}))

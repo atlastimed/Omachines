@@ -29,6 +29,13 @@ if($flags -contains 1){$desktop='available'}elseif($flags -contains 0){$desktop=
 $os=Get-CimInstance Win32_OperatingSystem
 $cpu=Get-CimInstance Win32_ComputerSystem
 $disk=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+$release=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$pending=[bool](@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') | Where-Object {Test-Path $_})
+# The last Omachines update run: its status and finish time only.
+$maintenance=$null
+try { $maintenance=Get-Content -Raw 'C:\OEM\Omachines\maintenance.json' -ErrorAction Stop | ConvertFrom-Json } catch {}
+# A power cut leaves "running" behind: only a live task can still be updating.
+if($maintenance -and $maintenance.status -eq 'running' -and (Get-ScheduledTask -TaskName 'Omachines-Maintenance' -ErrorAction SilentlyContinue).State -ne 'Running'){$maintenance.status='failed'}
 [ordered]@{
  desktop=$desktop
  cpu=[int]$cpu.NumberOfLogicalProcessors
@@ -36,6 +43,10 @@ $disk=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
  diskBytes=[long]$disk.Size
  diskFreeBytes=[long]$disk.FreeSpace
  boot=$os.LastBootUpTime.ToUniversalTime().ToString('o')
+ osVersion="$($release.DisplayVersion) build $($release.CurrentBuild).$($release.UBR)"
+ rebootPending=$pending
+ updateStatus=$(if($maintenance){$maintenance.status}else{''})
+ updatedAt=$(if($maintenance){$maintenance.finishedAt}else{''})
  asideInstalled=(Test-Path "$env:LOCALAPPDATA\Aside\Application\aside.exe")
  asidePath="$env:LOCALAPPDATA\Aside\Application\aside.exe"
  asideRunning=(@(Get-Process -Name aside -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -gt 0}).Count -gt 0)

@@ -6,11 +6,17 @@ Read README.md and PLAN.md. This is a native Omarchy plugin for existing VMs
 - Keep changes in this repository and the user-owned plugin install. Never edit
   `/usr/share/omarchy` or duplicate the system virtualization stack.
 - Preserve the existing Windows wrappers, encrypted disks, backup files and
-  root authorization boundary. Never store credentials or guest content here.
+  root authorization boundary: only start and stop may skip authorization, through
+  the opt-in polkit rule. Never store credentials or guest content here.
 - Ask before tests that stop/restart either VM or close user applications.
   Read-only probes of a running VM (`omarchy-vm status --json`) are fine.
 - Use one shared service across monitors, theme-native controls and bounded
   probes. Readiness is not agent activity. State may be stale or unknown.
+- Run the tests only through `scripts/check.py`, never `python -m unittest` on the
+  desktop (`tests/sealed.py` refuses it; new test files must import it first). It seals
+  them in private PID and network namespaces, because a mocked pid once
+  reached `kill(-1)` and killed the whole desktop session. Mocking
+  `<module>.subprocess.Popen` mocks it everywhere; signal only via `signal_group`.
 - Run `python3 scripts/check.py` on Omarchy. It includes actual Qt interaction
   tests using an isolated offscreen Quickshell runtime. Record separate physical
   desktop evidence. No extra long-running shell instance or web UI.

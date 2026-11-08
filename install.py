@@ -16,12 +16,12 @@ import time
 ROOT = Path(__file__).resolve().parent
 ID = "atlastimed.omachines"
 DOCS = ("README.md", "LICENSE", "INTEGRATION.md", "SECURITY.md",
-        "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "VALIDATION-v0.3.md", "REVIEW-FIXES.md")
+        "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "VALIDATION-v0.3.md", "VALIDATION-v0.5.md", "REVIEW-FIXES.md")
 FILES = ("manifest.json", "BarWidget.qml", "BarGlyph.qml", "MachineView.qml", "StatusRow.qml",
          "Service.qml", "Model.js", "BackupControls.qml", "ResourceControls.qml", *DOCS)
-BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1", "supervise.py")
+BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "guest-maintain.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1", "supervise.py")
 STATE = "installer.json"
-SECTIONS = ("left", "center", "right")
+SECTIONS = ("left", "centerBegin", "center", "centerEnd", "right")
 DEFAULT_PLACEMENT = {"section": "right", "index": 1}
 HELPER = Path("/usr/local/lib/omachines/admin.py")
 

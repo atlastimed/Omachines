@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 import importlib.machinery
 import json
 import os
@@ -14,6 +15,8 @@ import operations
 
 class CoreTests(unittest.TestCase):
     def setUp(self):
+        answering=patch('core.ssh_answering',side_effect=lambda:core.tcp(2222))
+        answering.start();self.addCleanup(answering.stop)
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)
         self.env=patch.dict(os.environ,{'XDG_STATE_HOME':str(self.path)})
@@ -59,10 +62,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.parse_guest({'asidePath':good})['asidePath'],good)
         self.assertEqual(core.parse_guest({'asidePath':good+' --bad'})['asidePath'],'')
 
-    def test_unknown_is_not_stopped(self):
+    def test_no_published_ports_means_stopped(self):
         with patch('core.tcp',return_value=False),patch('core.viewer_windows',return_value=[]),patch('core.backups',return_value=[]):
             state=core.collect(core.settings())
-        self.assertEqual(state['state'],'unreachable')
+        self.assertEqual(state['state'],'stopped')
         self.assertEqual(state['checks']['ssh']['status'],'offline')
 
     def test_successful_stop_records_stopped(self):
@@ -150,9 +153,9 @@ class CoreTests(unittest.TestCase):
             launch.assert_called_once()
 
     def test_focus_existing_viewer_no_duplicate(self):
-        with patch('operations.viewer_windows',return_value=['0x123']),patch('operations.run') as run,patch('operations.subprocess.Popen') as launch:
+        with patch('operations.viewer_windows',return_value=['0x123']),patch('operations.focus_window') as focus,patch('operations.subprocess.Popen') as launch:
             operations.perform('open',{})
-        run.assert_called_once_with(['hyprctl','dispatch','hl.dsp.focus({ window = "address:0x123" })'],3)
+        focus.assert_called_once_with('0x123')
         launch.assert_not_called()
 
     def test_diagnostic_excludes_private_fields(self):

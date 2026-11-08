@@ -2,6 +2,7 @@
 
 Fixtures never run omarchy-vm, SSH, sudo or Docker, and never touch a real VM.
 """
+import sealed  # refuses a direct run on the desktop
 from contextlib import redirect_stdout
 import importlib.machinery
 import importlib.util
@@ -132,7 +133,7 @@ class RegistryTests(Base):
         self.assertEqual(machines.get("omarchy")["connections"], machines.omarchy_machine()["connections"])
         self.assertNotIn("evil", self.registry.read_text())
         self.assertEqual(json.loads(self.registry.read_text())["selected"], "windows")
-        with patch("omarchy.run", side_effect=fake_run()) as run:
+        with patch("omarchy.run", side_effect=fake_run()) as run, patch("core.Client", side_effect=OSError), patch("core.tcp", return_value=False):
             core.collect(core.settings(), deep=True, machine_id="omarchy")
         self.assertTrue(run.call_args_list)
         self.assertTrue(all("evil" not in c.args[0][0] for c in run.call_args_list))
@@ -342,7 +343,7 @@ class SnapshotTests(Base):
             state = core.collect(core.settings())
         self.assertEqual(state["machineId"], "windows")
         self.assertEqual([(m["id"], m["state"], m["active"], m["selected"]) for m in state["machines"]],
-                         [("windows", "unreachable", False, True), ("omarchy", "running", True, False)])
+                         [("windows", "stopped", False, True), ("omarchy", "running", True, False)])
         self.assertTrue(state["capabilities"]["asideSupported"])
 
     def test_unavailable_summary_does_not_break_selected_snapshot(self):
@@ -423,7 +424,7 @@ class DaemonTests(Base):
     def test_lost_windows_ssh_invalidates_readiness_until_checked_again(self):
         ready = {k: core.check(s, "old") for k, s in (("ssh", "ready"), ("desktop", "available"), ("cua", "ready"), ("aside", "ready"))}
         def poll(ports, previous):
-            with patch("core.tcp", side_effect=lambda p: p in ports), patch("core.viewer_windows", return_value=[]), \
+            with patch("core.tcp", side_effect=lambda p: p in ports), patch("core.ssh_answering", side_effect=lambda: 2222 in ports), patch("core.viewer_windows", return_value=[]), \
                  patch("core.backups", return_value=[]), patch("core.capabilities", return_value={"ssh": True, "cua": True, "aside": True}):
                 return {**core.collect_windows({"demo": False, "pollSeconds": 120}, previous=previous), "machineId": "windows"}
         before = {"state": "running", "summary": "Windows is ready", "checks": ready, "machineId": "windows"}
@@ -669,9 +670,9 @@ class OperationTests(Base):
 
     def test_open_focuses_existing_viewer_without_view(self):
         machine = machines.omarchy_machine()
-        with patch("omarchy.hypr_windows", return_value=["0xabc"]), patch("omarchy.run") as run, patch("omarchy.subprocess.Popen") as popen:
+        with patch("omarchy.hypr_windows", return_value=["0xabc"]), patch("omarchy.focus_window") as focus, patch("omarchy.subprocess.Popen") as popen:
             self.assertEqual(omarchy.perform("open", self.config, {}, machine), "Omarchy VM viewer focused")
-        run.assert_called_once_with(["hyprctl", "dispatch", 'hl.dsp.focus({ window = "address:0xabc" })'], 3)
+        focus.assert_called_once_with("0xabc")
         popen.assert_not_called()
 
     def test_open_focuses_a_gliff_viewer_on_the_vm_tab_only(self):

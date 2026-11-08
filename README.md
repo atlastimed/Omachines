@@ -3,7 +3,7 @@
 A native Omarchy bar panel for existing virtual machines: desktop controls, agent
 connections, named backups, recovery and CPU/RAM allocation.
 
-**Early preview:** v0.3 manages two existing machines: an Omarchy Windows VM and
+**Early preview:** Omachines manages two existing machines: an Omarchy Windows VM and
 an Omarchy (Linux) VM run by the user-level `omarchy-vm` command. It does not
 install either guest or create other VMs. Optional SSH, Cua and Aside bridges must
 already be configured. A VM creation wizard and arbitrary providers are future work.
@@ -16,10 +16,12 @@ hourglass in front while an operation runs. The tooltip lists every machine.
 Right-click opens or focuses the selected machine; middle-click checks connections.
 Closing a viewer keeps its VM running. The Omarchy VM opens in gliff, Omarchy's remote
 desktop over SSH, once its desktop has signed in, and in the SPICE viewer before that
-(`omarchy-vm view` chooses; Omachines focuses either). Opening Windows counts as an operation until
-its viewer appears: approve or cancel the authorization prompt. A prompt left
-unanswered for 10 minutes is withdrawn, so it can never start Windows after a later
-shutdown or backup.
+(`omarchy-vm view` chooses; Omachines focuses either). gliff needs Hyprland on the
+remote machine, so it cannot show Windows, which keeps its RDP viewer. A viewer
+minimized to Omarchy's dock comes back when you open it again. Opening Windows counts
+as an operation until its viewer appears. If an authorization prompt appears, approve
+or cancel it: one left unanswered for 10 minutes is withdrawn, so it can never start
+Windows after a later shutdown or backup.
 
 When both machines are available, a switcher at the top of the panel selects the
 machine shown; **M** cycles machines. The choice is remembered and shared by every
@@ -27,7 +29,9 @@ monitor. Controls that a machine does not support are hidden. Only one operation
 runs at a time across both machines; the panel names the machine an operation
 belongs to.
 
-- **Overview:** desktop, storage, Aside (Windows), shared files, start and shutdown.
+- **Overview:** desktop, storage, Aside (Windows), shared files, start and shutdown;
+  for Windows also its version and update state, **Update Windows and tools** and
+  **Restart Windows**.
 - **Agents:** separate SSH, desktop and Cua checks; for Windows also Aside browser,
   CLI version and CLI sign-in checks and console recovery; connection instructions
   and private diagnostics.
@@ -47,11 +51,11 @@ Actual restore also requires typing the selected backup identity in its terminal
 
 ## Install and update
 
-Tested on Omarchy 4.0.6 and 4.5.0 with its Quickshell shell, Python 3, Docker and an existing
+Tested on Omarchy 4.5.0 with its Quickshell shell, Python 3, Docker and an existing
 Omarchy Windows VM using protected storage mounts, plus an Omarchy VM run by
 `~/.local/bin/omarchy-vm` (QEMU/KVM as a systemd user unit). The Omarchy VM
-appears only when that command exists. No pip/npm packages, separate web server,
-root daemon or new passwordless policy are installed.
+appears only when that command exists. No pip/npm packages, separate web server or
+root daemon are installed, and a passwordless policy only if you ask for it below.
 
 ```bash
 python3 scripts/check.py
@@ -59,9 +63,22 @@ python3 install.py
 # Optional, required for the built-in backup/recovery/resource controls:
 sudo /usr/bin/python3 -I scripts/install-admin.py
 # Refresh the catalogue from Agents or Backups after installing the helper.
+# Optional: start and stop Windows without a password or terminal.
+sudo /usr/bin/python3 -I scripts/install-admin.py --allow-windows-start
 ```
 
-Both commands are repeated when updating code that changes the administrator
+The helper installer also makes this PC wait for Windows when it shuts down. Omarchy
+gives every system service 5 seconds to stop, so Docker would otherwise be killed
+while Windows is still closing; a `docker.service` drop-in extends that to 135 seconds
+and delays only a shutdown that has a VM to wait for. The panel warns while it is missing.
+
+`--allow-windows-start` adds a polkit rule for exactly the commands
+`omarchy-windows-vm __priv up`, `up_wait` and `down`, for your active session. Opening,
+starting and stopping Windows then ask for nothing, as on the Omarchy VM; backup,
+restore and allocation still ask every time. `--revoke-windows-start` removes it. See
+[security boundaries](SECURITY.md) for what it allows.
+
+The commands are repeated when updating code that changes the administrator
 helper; the installer says when the installed helper is older. Version 0.3.1
 updates it to 0.3.1: a Windows restore asks for its typed confirmation and takes
 the lifecycle lock before extracting the backup, so a cancelled or refused restore
@@ -146,6 +163,16 @@ holds up other operations.
 If the worker is killed outright, the panel shows the operation as still running
 until the command ends, then as interrupted.
 
+### Updating Windows
+
+**Update Windows and tools** runs in your Windows session while Windows keeps running:
+Windows Update (optional previews stay a choice in Windows Settings), winget apps,
+Rust, mise tools, Cua Driver and Aside. It never restarts Windows; the Overview says
+when a restart is needed and **Restart Windows** does it, inside the VM and without a
+password. The panel shows the current stage and a count of what changed. Details stay in
+`C:\OEM\Omachines\maintenance.log` in Windows. Create a backup first if you want a way
+back. Closing the panel or Omachines does not stop an update already running in Windows.
+
 Starting Windows from the panel is refused while less memory is free than its RAM
 allocation, which could otherwise get it or the Omarchy VM killed.
 
@@ -213,9 +240,11 @@ invented agent activity. Status can be stale or unknown.
 Native `qs.Ui`, popup colours, fonts, spacing and controls follow Omarchy's theme.
 The panel stays compact and scrolls when needed. Playwright cannot test this native
 QML surface; the check script runs Python tests, manifest validation, qmllint and
-real Qt key/mouse interactions in an isolated offscreen Quickshell runtime.
+real Qt key/mouse interactions in an isolated offscreen Quickshell runtime. It runs
+the Python tests in a private PID namespace, without the desktop session's variables
+or your home folder, because they start processes and send signals.
 Physical Hyprland and live Windows checks are recorded separately.
 
-See [validation](VALIDATION-v0.3.md) ([v0.2](VALIDATION-v0.2.md)), [security boundaries](SECURITY.md),
+See [validation](VALIDATION-v0.5.md) ([v0.3](VALIDATION-v0.3.md), [v0.2](VALIDATION-v0.2.md)), [security boundaries](SECURITY.md),
 [contribution checks](CONTRIBUTING.md), and the
 [Omarchy plugin contract](https://plugins.omarchy.org/develop.html).

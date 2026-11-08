@@ -10,15 +10,21 @@ storage or SSH authentication.
 
 | Capability | Expected local integration |
 | --- | --- |
-| Start/stop | Packaged `/usr/bin/omarchy-windows-vm` with the privileged `__priv up/down` interface. User authorizes elevation in a visible terminal. |
-| Viewer | Executable `~/.local/bin/windows-vm-launch`; starts/opens the viewer, retains the VM when the viewer closes. Existing window is matched by FreeRDP class and title `Windows VM - Omarchy`. Opening it keeps the operation (and its lock) until that window appears or the launcher exits; a launcher still waiting after 10 minutes, typically at an unanswered authorization prompt, is stopped with its process group. The viewer then runs on its own. |
-| Command checks | Executable `~/.local/bin/windows-vm-ssh`; passes its argument to a preconfigured guest SSH connection without prompting. Loopback port 2222 is used for reachability. |
+| Start/stop | Packaged `/usr/bin/omarchy-windows-vm` with the privileged `__priv up/down` interface. User authorizes elevation in a visible terminal, or, with the optional polkit rule, it runs through `pkexec` in the background. |
+| Viewer | Executable `~/.local/bin/windows-vm-launch`; starts/opens the viewer, retains the VM when the viewer closes. It should bring Windows up only when RDP does not answer, so reopening asks for nothing. Existing window is matched by FreeRDP class and title `Windows VM - Omarchy`. Opening it keeps the operation (and its lock) until that window appears or the launcher exits; a launcher still waiting after 10 minutes, typically at an unanswered authorization prompt, is stopped with its process group. The viewer then runs on its own. |
+| Command checks | Executable `~/.local/bin/windows-vm-ssh`; passes its argument to a preconfigured guest SSH connection without prompting. Docker's proxy accepts connections on the published ports as soon as the container runs, so ports 2222 and 8006 show only that the VM is on; Windows counts as running once sshd on 2222 sends its banner. A seen banner is trusted for 60 seconds while the port stays open, because each one makes sshd start a process in Windows. No published port means stopped. |
+| Updates | The guest needs PowerShell, a signed-in session for a scheduled task, and writable `C:\OEM\Omachines`. Omachines copies `backend/guest-maintain.ps1` there over stdin and starts it as the task `Omachines-Maintenance`. It polls `maintenance.json` for known stages and counts; the log stays in the guest. |
+| Restart | `shutdown.exe /r` through the SSH bridge. The container keeps running, so no elevation is needed. |
 | Desktop tools | Executable `~/.local/bin/windows-vm-mcp`; exposes the guest's interactive Cua driver as JSON-line stdio MCP, including `health_report` and `launch_app`. |
 | Aside tools | Executable `~/.local/bin/windows-vm-aside-mcp`; exposes Aside's `repl` through stdio MCP. A health probe only prints a fixed connection-check message. |
 | Console recovery | Omarchy's local web console at `http://127.0.0.1:8006`. |
 | Console handoff | Existing guest script `C:\OEM\guest-console.ps1`, invoked through the SSH bridge. It should transfer a disconnected session, not unlock a locked user. |
 | Shared files | Existing `~/Windows` directory. |
 | Storage free space | Existing `~/.windows` storage path. |
+
+`guest-status.ps1` also reports the Windows version, whether a restart is pending and the
+last update's status and finish time. A `running` status without a live task counts as
+failed, since a power cut leaves it behind.
 
 The guest must already have PowerShell, working SSH, an interactive desktop and
 the relevant optional tools. Cua running in a non-interactive service session is
@@ -144,3 +150,17 @@ or two minutes without an SSH bridge), runs `__priv down` (the bind stays mounte
 then runs the helper's backup with Windows stopped. Windows is left stopped. If it
 does not finish starting it is shut down and nothing is backed up. The helper
 itself is unchanged.
+
+## Version 0.5 host integration
+
+`scripts/install-admin.py`, run through sudo, writes
+`/etc/systemd/system/docker.service.d/omachines-windows-shutdown.conf`
+(`TimeoutStopSec=135`, `After=local-fs.target`) because Omarchy's
+`DefaultTimeoutStopSec=5s` and its `DefaultDependencies=no` drop-in would otherwise let
+a PC shutdown cut Windows off. With `--allow-windows-start` it also writes
+`/etc/polkit-1/rules.d/49-omachines-windows.rules` and the root-owned marker
+`/usr/local/lib/omachines/windows-start-allowed`, which the panel reads because polkit
+keeps its rules unreadable to the user. A stale marker only brings back a prompt.
+
+Omachines' window focus handles Omarchy 4.5's dock: a window on `special:minimized` is
+moved to the active workspace first, as the dock does.

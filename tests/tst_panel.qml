@@ -353,6 +353,40 @@ Window {
       view.moveCursor(0,1); compare(view.cursorIndex,1)
       view.textKey("3"); compare(view.section,"Backups")
     }
+    function test_windows_update_and_restart_need_confirmation() {
+      view.machine=Object.assign({},view.machine,{capabilities:Object.assign({},view.machine.capabilities,{update:true,restart:true})})
+      var names=actionNames("Overview")
+      verify(names.indexOf("update")>=0); verify(names.indexOf("restart")>=0)
+      for (var action of ["update","restart"]) {
+        actionSpy.clear()
+        view.choose(view.actions[names.indexOf(action)])
+        compare(view.confirmation,action)
+        compare(actionSpy.count,0)
+        verify(findChild(view,"confirmation-text").text.length>0)
+        view.confirmation=""
+      }
+    }
+    function test_update_row_explains_what_is_left_to_do() {
+      compare(Model.updateLine({guest:{updateStatus:"running"}},0),"Updating now")
+      compare(Model.updateLine({guest:{rebootPending:true,updateStatus:"complete",updatedAt:"2026-01-01T00:00:00Z"}},0),"Restart Windows to finish updating")
+      compare(Model.updateLine({guest:{updateStatus:"failed"}},0),"The last update stopped early")
+      compare(Model.updateLine({guest:{updateStatus:"partial",updatedAt:"2026-01-01T00:00:00Z"}},0),"The last update had problems; see its log in Windows")
+      compare(Model.updateLine({guest:{}},0),"Not updated through Omachines yet")
+      compare(Model.updateLine({guest:{updatedAt:"2026-01-01T00:00:00Z"}},Date.parse("2026-01-01T02:00:00Z")),"Updated 2 h ago")
+    }
+    function test_host_shutdown_note_only_while_windows_is_on() {
+      compare(Model.hostShutdownNote({provider:"omarchy-windows",hostShutdownSafe:true,state:"running"}),"")
+      compare(Model.hostShutdownNote({provider:"omarchy-windows",hostShutdownSafe:false,state:"stopped"}),"")
+      compare(Model.hostShutdownNote({provider:"omarchy-qemu",hostShutdownSafe:false,state:"running"}),"")
+      verify(Model.hostShutdownNote({provider:"omarchy-windows",hostShutdownSafe:false,state:"running"}).length>0)
+    }
+    function test_starting_windows_offers_shutdown_but_not_start() {
+      view.machine=Object.assign({},view.machine,{state:"starting"})
+      var rows=view.actions
+      var byName={}; for (var row of rows) byName[row.action]=row
+      compare(byName.start.enabled,false)
+      compare(byName.stop.enabled,true)
+    }
     function test_shutdown_requires_explicit_confirmation() {
       var action = view.actions.filter(function(a){return a.action === "stop"})[0]
       view.choose(action)

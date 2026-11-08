@@ -89,7 +89,7 @@ Panel {
     open: root.opened
     focusTarget: keys
     contentWidth: panel.fittedContentWidth(Style.space(430))
-    contentHeight: panel.fittedContentHeight(view.implicitHeight,Style.space(720))
+    contentHeight: panel.fittedContentHeight(view.implicitHeight,Style.space(860))
     PanelKeyCatcher {
       id: keys
       anchors.fill: parent

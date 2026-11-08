@@ -7,7 +7,7 @@ Omarchy VM); discuss new backends or privileged operations before implementing t
 Run on Omarchy:
 
 ```bash
-python3 scripts/check.py
+python3 scripts/check.py  # always this, not unittest directly: it seals the tests off from the desktop
 python3 scripts/privacy_check.py
 mise exec aqua:gitleaks/gitleaks@8.30.1 -- gitleaks git --redact --log-opts=--all
 ```

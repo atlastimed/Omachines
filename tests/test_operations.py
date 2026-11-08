@@ -1,3 +1,4 @@
+import sealed  # refuses a direct run on the desktop
 import fcntl
 from contextlib import redirect_stdout
 import io
@@ -360,7 +361,7 @@ class ProviderSessionTests(unittest.TestCase):
         self.assertNotIn("start_new_session", popen.call_args.kwargs)
 
     def test_windows_sudo_providers_keep_the_terminal(self):
-        with self.popen() as popen:
+        with self.popen() as popen, patch("operations.quick_lifecycle", return_value=False):
             operations.vm_priv("up")
         self.assertEqual(popen.call_args.args[0][0], "sudo")
         self.assertNotIn("start_new_session", popen.call_args.kwargs)

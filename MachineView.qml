@@ -87,7 +87,7 @@ Column {
   }
   function choose(row) {
     if (!row.enabled || busy || machine.demo) return
-    if (["stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"].indexOf(row.action) >= 0) { confirmationParameters=JSON.parse(JSON.stringify(row.parameters || {})); confirmation = row.action }
+    if (["stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail", "restart", "update"].indexOf(row.action) >= 0) { confirmationParameters=JSON.parse(JSON.stringify(row.parameters || {})); confirmation = row.action }
     else actionRequested(row.action, false, row.parameters || {}, machineId)
   }
   function selectMachine(id) {
@@ -172,6 +172,14 @@ Column {
     StatusRow { width: parent.width; label: "Desktop"; value: Model.checked(root.machine,"desktop").message; foreground: root.foreground; fontFamily: root.fontFamily }
     StatusRow { width: parent.width; label: Model.isOmarchy(root.machine) ? "Guest disk" : "Windows disk"; value: Model.freeSpace((root.machine.resources || {}).diskFreeBytes); foreground: root.foreground; fontFamily: root.fontFamily }
     StatusRow { width: parent.width; label: "VM drive"; value: Model.freeSpace((root.machine.storage || {}).availableBytes); foreground: root.foreground; fontFamily: root.fontFamily }
+    StatusRow { objectName: "windows-version"; width: parent.width; visible: !!(root.machine.guest || {}).osVersion; label: "Windows"; value: (root.machine.guest || {}).osVersion || ""; foreground: root.foreground; fontFamily: root.fontFamily }
+    StatusRow { objectName: "windows-updates"; width: parent.width; visible: !Model.isOmarchy(root.machine) && !!root.machine.guest; label: "Updates"; value: Model.updateLine(root.machine, root.clock); foreground: root.foreground; fontFamily: root.fontFamily }
+    Text {
+      objectName: "host-shutdown-note"
+      width: parent.width; visible: text !== ""; textFormat: Text.PlainText
+      text: Model.hostShutdownNote(root.machine)
+      color: Commons.Color.urgent; font.family: root.fontFamily; font.pixelSize: root.fontTokens.caption; wrapMode: Text.WordWrap
+    }
     Text {
       width: parent.width; textFormat: Text.PlainText
       text: "Closing the viewer keeps " + Model.name(root.machine) + " running. Connection readiness does not indicate whether an agent is working."
