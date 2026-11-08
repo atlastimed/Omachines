@@ -77,7 +77,9 @@ function confirmationText(action, p, state) {
     "rehearsal-pass": "Have you opened the rehearsal image and confirmed that the restored Windows copy reached its desktop or sign-in screen? This records your review and stops only the disposable VM.",
     "rehearsal-fail": "Record that the offline boot failed and stop the disposable VM? Its files remain for inspection.",
     backup: "Close or save your Windows work first. This will shut down Windows, copy and verify its complete state, then start it again. A terminal asks for your Omarchy password.",
-    stop: "Shut down Windows? Save your work first. Windows apps and agent tasks will stop."
+    stop: "Shut down Windows? Save your work first. Windows apps and agent tasks will stop.",
+    restart: "Restart Windows? Save your work first. Windows apps and agent tasks will stop, and an open viewer disconnects. No password is needed.",
+    update: "Update Windows, winget apps, Rust, mise tools, Cua Driver and Aside? Windows keeps running, but apps being updated may close and agent connections may drop briefly. Windows does not restart by itself. Create a backup first if you want a way back."
   })[action] || "Return a disconnected Windows session to its console? This may change where the desktop is displayed. It will not unlock a locked session."
 }
 function actionRows(tab, state, aside) {
@@ -87,7 +89,9 @@ function actionRows(tab, state, aside) {
     rows.push({action:"open",label:"Open desktop",detail:"Start " + n + " or focus its viewer",icon:"󰍹",enabled:!!caps.viewer})
     if (asideRows) rows.push({action:"aside",label:"Open Aside",detail:"Use Aside in the Windows desktop",icon:"󰖟",enabled:!!caps.aside && running})
     rows.push({action:"shared",label:"Shared folder",detail:"Files shared with " + n,icon:"󰉋",enabled:caps.shared !== false})
-    rows.push({action:"start",label:"Start in background",detail:"Start " + n + " without a viewer",icon:"󰐊",enabled:!!caps.lifecycle && !running && !(linux && on(state.state))})
+    rows.push({action:"start",label:"Start in background",detail:"Start " + n + " without a viewer",icon:"󰐊",enabled:!!caps.lifecycle && !on(state.state)})
+    if (caps.update === true) rows.push({action:"update",label:"Update Windows and tools…",detail:"Windows Update, winget apps, Rust, mise, Cua and Aside",icon:"󰚰",enabled:running})
+    if (caps.restart === true) rows.push({action:"restart",label:"Restart Windows…",detail:"Restart inside the VM; no password needed",icon:"󰜉",enabled:running})
     rows.push({action:"stop",label:"Shut down " + n + "…",detail:linux ? "Close guest apps and release its RAM" : "Close Windows apps and release its RAM",icon:"󰐥",enabled:!!caps.lifecycle && (running || state.state === "starting" || (linux && on(state.state)))})
   } else if (tab === "Agents") {
     rows.push({action:"refresh",label:"Check connections",detail:asideRows ? "Check commands, desktop tools and Aside" : "Check commands and desktop tools",icon:"󰑐",enabled:true})
@@ -101,6 +105,20 @@ function actionRows(tab, state, aside) {
     if (caps.catalogue === true) rows.push({action:"inspect",label:"Refresh backup catalogue",detail:"Find existing archives; asks for your Omarchy password",icon:"󰑐",enabled:!!caps.admin})
   }
   return rows
+}
+// What the last Omachines update left behind, for the Overview's Updates row.
+function updateLine(state, now) {
+  var guest = state.guest || {}
+  if (guest.updateStatus === "running") return "Updating now"
+  if (guest.rebootPending) return "Restart Windows to finish updating"
+  if (guest.updateStatus === "failed") return "The last update stopped early"
+  return guest.updatedAt ? "Updated " + ago(guest.updatedAt, now).toLowerCase() : "Not updated through Omachines yet"
+}
+// Omarchy gives system services 5 seconds to stop, too short for Windows to
+// shut down with the PC. The administrator helper installer extends it.
+function hostShutdownNote(state) {
+  return state.provider === "omarchy-windows" && state.hostShutdownSafe === false && on(state.state)
+    ? "Shut Windows down before turning off this PC, or run the administrator helper installer so the PC waits for it." : ""
 }
 function agentChecks(state, aside) {
   var caps = state.capabilities || {}

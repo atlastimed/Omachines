@@ -342,7 +342,7 @@ class SnapshotTests(Base):
             state = core.collect(core.settings())
         self.assertEqual(state["machineId"], "windows")
         self.assertEqual([(m["id"], m["state"], m["active"], m["selected"]) for m in state["machines"]],
-                         [("windows", "unreachable", False, True), ("omarchy", "running", True, False)])
+                         [("windows", "stopped", False, True), ("omarchy", "running", True, False)])
         self.assertTrue(state["capabilities"]["asideSupported"])
 
     def test_unavailable_summary_does_not_break_selected_snapshot(self):
@@ -423,7 +423,7 @@ class DaemonTests(Base):
     def test_lost_windows_ssh_invalidates_readiness_until_checked_again(self):
         ready = {k: core.check(s, "old") for k, s in (("ssh", "ready"), ("desktop", "available"), ("cua", "ready"), ("aside", "ready"))}
         def poll(ports, previous):
-            with patch("core.tcp", side_effect=lambda p: p in ports), patch("core.viewer_windows", return_value=[]), \
+            with patch("core.tcp", side_effect=lambda p: p in ports), patch("core.ssh_answering", side_effect=lambda: 2222 in ports), patch("core.viewer_windows", return_value=[]), \
                  patch("core.backups", return_value=[]), patch("core.capabilities", return_value={"ssh": True, "cua": True, "aside": True}):
                 return {**core.collect_windows({"demo": False, "pollSeconds": 120}, previous=previous), "machineId": "windows"}
         before = {"state": "running", "summary": "Windows is ready", "checks": ready, "machineId": "windows"}

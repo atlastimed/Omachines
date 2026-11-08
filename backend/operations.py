@@ -1,4 +1,5 @@
 """Explicit operations. A terminal-owned worker survives shell reloads."""
+import base64
 from contextlib import contextmanager
 import fcntl
 import json
@@ -12,15 +13,16 @@ import threading
 import time
 import uuid
 
-from core import (ROOT, OperationError, admission, backups, busy, check, collect, now, operation, read_json,
-                  reservation_fresh, run, settings, state_dir, viewer_windows, windows_reachability, wrapper, write_json)
+from core import (ROOT, OperationError, admission, backups, busy, check, collect, guest_powershell, now, operation,
+                  quick_lifecycle, read_json, reservation_fresh, run, settings, ssh_banner, state_dir, viewer_windows,
+                  windows_reachability, wrapper, write_json)
 from mcp import Client
 from probes import install_shutdown_handlers
 
-ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections"}
+ACTIONS = {"open", "start", "stop", "backup", "console", "shared", "aside", "handoff", "diagnostics", "inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "rehearsal-image", "restore", "rollback", "label", "connections", "restart", "update"}
 ADMIN = {"inspect", "verify", "allocate", "rehearse", "rehearsal-pass", "rehearsal-fail", "restore", "rollback"}
 TERMINAL = {"start", "stop", "backup"} | ADMIN
-DISRUPTIVE = {"stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail"}
+DISRUPTIVE = {"stop", "backup", "handoff", "allocate", "rehearse", "restore", "rollback", "rehearsal-pass", "rehearsal-fail", "restart", "update"}
 # The Omarchy VM needs no password: only restore uses a visible terminal, for
 # its typed confirmation. Other operations are background workers.
 OMARCHY_ACTIONS = {"open", "start", "stop", "shared", "backup", "verify", "label", "restore", "allocate", "diagnostics", "connections"}
@@ -64,7 +66,12 @@ def supported(action, machine):
 
 
 def terminal(action, machine):
-    return action in (OMARCHY_TERMINAL if omarchy(machine) else TERMINAL)
+    if omarchy(machine):
+        return action in OMARCHY_TERMINAL
+    # With the optional polkit rule, starting and stopping need no password.
+    if action in ("start", "stop") and quick_lifecycle():
+        return False
+    return action in TERMINAL
 
 
 def record(action, status, message, **extra):
@@ -165,8 +172,14 @@ def request_action(action, config, confirmed=False, parameters=None, machine_id=
 def vm_priv(action):
     if action not in ("up","down"):
         raise OperationError("Invalid VM operation")
-    with provider(["sudo","/usr/bin/env",f"PKEXEC_UID={os.getuid()}",
-                   "/usr/bin/omarchy-windows-vm","__priv",action]) as result:
+    if quick_lifecycle():
+        # Allowed by the polkit rule for these exact commands. Detached: no
+        # terminal is involved, and closing one cannot interrupt the VM.
+        argv,options=["/usr/bin/pkexec","/usr/bin/omarchy-windows-vm","__priv",action],\
+            {"detach":True,"stdin":subprocess.DEVNULL,"stdout":subprocess.DEVNULL,"stderr":subprocess.DEVNULL}
+    else:
+        argv,options=["sudo","/usr/bin/env",f"PKEXEC_UID={os.getuid()}","/usr/bin/omarchy-windows-vm","__priv",action],{}
+    with provider(argv,**options) as result:
         pass
     if result.returncode:
         raise OperationError("VM operation failed or authentication was cancelled")
@@ -201,6 +214,133 @@ def open_windows(launcher):
     if p.returncode:
         raise OperationError("Windows did not start, or authorization was cancelled")
     return "Windows viewer closed"
+
+
+RESTART_DOWN = 120   # seconds Windows may take to go down after a restart request
+RESTART_UP = 300     # and to answer over SSH again
+UPDATE_LIMIT = 4*3600
+UPDATE_SCRIPT = r"C:\OEM\Omachines\maintain.ps1"
+UPDATE_TASK = "Omachines-Maintenance"
+UPDATE_STAGES = {"starting":"Starting the update","windows-update":"Installing Windows updates; this can take a while",
+                 "apps":"Updating apps with winget","runtimes":"Updating Rust and mise tools",
+                 "cua":"Updating Cua Driver","aside":"Updating Aside",
+                 "cleanup":"Cleaning up old Windows components","finished":"Finishing the update"}
+# Fails when Windows is not signed in: the task needs the user's own session.
+UPDATE_START = r"""$ErrorActionPreference='Stop'
+if((Get-ScheduledTask -TaskName '%(task)s' -ErrorAction SilentlyContinue).State -eq 'Running'){throw 'running'}
+Remove-Item 'C:\OEM\Omachines\maintenance.json' -ErrorAction SilentlyContinue
+$action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File %(script)s -RunId %(run)s'
+$principal=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 4) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName '%(task)s' -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName '%(task)s'"""
+UPDATE_READ = r"Get-Content -Raw 'C:\OEM\Omachines\maintenance.json' -ErrorAction SilentlyContinue"
+UPDATE_INSTALL = r"""New-Item -ItemType Directory -Force C:\OEM\Omachines | Out-Null
+$in=[Console]::OpenStandardInput();$out=[IO.File]::Create('%s');$in.CopyTo($out);$out.Close()"""
+
+
+def copy_to_guest(data):
+    ssh=wrapper("windows-vm-ssh")
+    if not ssh:
+        raise OperationError("Windows SSH connection is missing")
+    encoded=base64.b64encode((UPDATE_INSTALL%UPDATE_SCRIPT).encode("utf-16-le")).decode()
+    try:
+        subprocess.run([ssh,f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"],input=data,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60,check=True)
+    except (OSError,subprocess.SubprocessError):
+        raise OperationError("Could not copy the update script into Windows; check the connection") from None
+
+
+def parse_update(text, run_id):
+    # Guest output is reduced to known stages and counts; nothing else is shown.
+    try:
+        raw=json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(raw,dict) or raw.get("runId")!=run_id or raw.get("status") not in ("running","complete","failed"):
+        return None
+    count=lambda key:raw[key] if type(raw.get(key)) is int and raw[key]>=0 else 0
+    return {"status":raw["status"],"stage":raw.get("stage") if raw.get("stage") in UPDATE_STAGES else "",
+            "windows":count("windowsUpdates"),"windowsFailed":count("windowsFailed"),"apps":count("apps"),
+            "appsFailed":count("appsFailed"),"reboot":raw.get("rebootRequired") is True,
+            "problems":len(raw["problems"]) if isinstance(raw.get("problems"),list) else 0}
+
+
+def update_summary(result):
+    plural=lambda n,word:f"{n} {word}"+("" if n==1 else "s")
+    text=f"Windows and tools updated: {plural(result['windows'],'Windows update')}, {plural(result['apps'],'app')}"
+    failed=result["windowsFailed"]+result["appsFailed"]+result["problems"]
+    if failed:
+        text+=f"; {plural(failed,'item')} did not update, see C:\\OEM\\Omachines\\maintenance.log in Windows"
+    return text+("; restart Windows to finish" if result["reboot"] else "")
+
+
+def update_windows():
+    # The task runs in Windows and outlives this worker; a stop request only
+    # stops the following, never the update. No connection is held meanwhile,
+    # because updates can restart the guest's SSH server or PowerShell.
+    run_id=uuid.uuid4().hex[:12]
+    record("update","running","Copying the update script into Windows")
+    copy_to_guest((ROOT/"backend/guest-maintain.ps1").read_bytes())
+    try:
+        guest_powershell(UPDATE_START%{"task":UPDATE_TASK,"script":UPDATE_SCRIPT,"run":run_id},30)
+    except OperationError:
+        raise OperationError("Windows did not start the update; one may already be running, or sign in to Windows first") from None
+    record("update","running",UPDATE_STAGES["starting"])
+    deadline,seen_at,stage=time.monotonic()+UPDATE_LIMIT,time.monotonic(),""
+    with providing_work():
+        while time.monotonic()<deadline:
+            if stopping:
+                return "The update continues in Windows; Omachines stopped following it"
+            time.sleep(update_poll())
+            try:
+                result=parse_update(guest_powershell(UPDATE_READ,20),run_id)
+            except OperationError:
+                continue
+            if result is None:
+                if time.monotonic()-seen_at>180 and not stage:
+                    raise OperationError("Windows did not start the update; sign in to Windows and try again")
+                continue
+            if result["stage"] and result["stage"]!=stage:
+                stage=result["stage"]
+                record("update","running",UPDATE_STAGES[stage])
+            if result["status"]=="failed":
+                raise OperationError("The update stopped early; see C:\\OEM\\Omachines\\maintenance.log in Windows")
+            if result["status"]=="complete":
+                return update_summary(result)
+    raise OperationError("The update did not finish within 4 hours; check Windows before retrying")
+
+
+def update_poll():
+    return 10
+
+
+def restart_windows():
+    ssh=wrapper("windows-vm-ssh")
+    if not ssh:
+        raise OperationError("Windows SSH connection is missing")
+    if not ssh_banner():
+        raise OperationError("Windows is not answering over SSH; use the recovery console or shut it down")
+    record("restart","running","Restarting Windows")
+    # A restart needs no root: it stays inside the guest, and the VM keeps running.
+    run([ssh,'shutdown.exe /r /t 2 /d p:0:0 /c "Requested by Omachines"'],20)
+    with providing_work():
+        for answering,limit,failure in ((False,RESTART_DOWN,"Windows did not begin restarting; an open app may be blocking it"),
+                                        (True,RESTART_UP,"Windows did not come back after restarting; check the recovery console")):
+            deadline=time.monotonic()+limit
+            while ssh_banner()!=answering:
+                if stopping:
+                    return "Windows is restarting; Omachines stopped following it"
+                if time.monotonic()>deadline:
+                    raise OperationError(failure)
+                time.sleep(restart_poll())
+            if answering:
+                return "Windows restarted"
+            record("restart","running","Windows is restarting")
+
+
+def restart_poll():
+    return 3
 
 
 def ensure_memory():
@@ -413,6 +553,10 @@ def perform(action, config, parameters=None, machine=None):
     if action=="stop":
         vm_priv("down")
         return "Windows shut down"
+    if action=="restart":
+        return restart_windows()
+    if action=="update":
+        return update_windows()
     if action=="backup":
         if Path("/usr/local/lib/omachines/admin.py").is_file():
             attached=attach_windows_storage()
@@ -466,7 +610,7 @@ def perform(action, config, parameters=None, machine=None):
     if action=="connections":
         m=machine;folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/'connections.txt'
-        text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
+        text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\nPlain SSH and scp: ssh windows-vm, when ~/.ssh/config includes its settings. The guest shell is PowerShell.\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
         fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'w') as f:f.write(text)
         subprocess.Popen(['xdg-open',str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
@@ -552,7 +696,7 @@ def supervised(action, request_id, interactive):
             finally:
                 cancellable=False
             record(action,"complete",message)
-            if action in TERMINAL or action in ("diagnostics","backup","verify","allocate"):
+            if action in TERMINAL or action in ("diagnostics","backup","verify","allocate","restart","update"):
                 notify(message,config)
             if interactive:
                 say("\n"+message)

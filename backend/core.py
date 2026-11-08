@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 ID = "atlastimed.omachines"
 
 
@@ -113,17 +113,45 @@ def tcp(port):
         return False
 
 
+def ssh_banner(port=2222):
+    # Docker's port proxy accepts a connection as soon as the container runs,
+    # long before Windows has booted. Only the guest's sshd sends this banner.
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.4) as sock:
+            sock.settimeout(0.8)
+            return sock.recv(16).startswith(b"SSH-")
+    except OSError:
+        return False
+
+
+SSH_TRUST = 120  # seconds a seen banner vouches for an open port
+_ssh_seen = None
+
+
+def ssh_answering(port=2222):
+    # A banner makes sshd start a session process in Windows, so the frequent
+    # shallow poll asks again only once in a while; deep checks test SSH itself.
+    global _ssh_seen
+    if _ssh_seen is not None and time.monotonic()-_ssh_seen < SSH_TRUST and tcp(port):
+        return True
+    _ssh_seen = time.monotonic() if ssh_banner(port) else None
+    return _ssh_seen is not None
+
+
 def check(code, message, stamp=None):
     return {"status": code, "message": message, "checkedAt": stamp or now()}
 
 
-def guest_status():
+def guest_powershell(code, timeout=18):
     ssh = wrapper("windows-vm-ssh")
     if not ssh:
         raise OperationError("Windows SSH wrapper is not configured")
-    code = (ROOT/"backend/guest-status.ps1").read_text()
     encoded = base64.b64encode(code.encode("utf-16-le")).decode()
-    return json.loads(run([ssh, f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"], 18))
+    return run([ssh, f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"], timeout)
+
+
+def guest_status():
+    return json.loads(guest_powershell((ROOT/"backend/guest-status.ps1").read_text()))
 
 
 def parse_guest(raw):
@@ -141,6 +169,12 @@ def parse_guest(raw):
     path = raw.get("asidePath", "")
     result["asidePath"] = path if isinstance(path, str) and re.fullmatch(r"[A-Za-z]:\\Users\\[^\\\r\n]+\\AppData\\Local\\Aside\\Application\\aside\.exe", path, re.I) else ""
     result["boot"] = raw.get("boot", "")[:40] if isinstance(raw.get("boot"), str) else ""
+    os_version = raw.get("osVersion")
+    result["osVersion"] = os_version if isinstance(os_version, str) and re.fullmatch(r"[0-9A-Za-z]{2,8} build \d{4,6}\.\d{1,6}", os_version) else ""
+    result["rebootPending"] = raw.get("rebootPending") is True
+    result["updateStatus"] = raw.get("updateStatus") if raw.get("updateStatus") in ("running", "complete", "failed") else ""
+    finished = raw.get("updatedAt")
+    result["updatedAt"] = finished if isinstance(finished, str) and re.fullmatch(r"[0-9T:.+\-Z]{10,40}", finished) else ""
     return result
 
 
@@ -351,6 +385,22 @@ def backups(config):
     return sorted(found.values(), key=lambda r: r.get("createdAt", ""), reverse=True)[:20]
 
 
+# Written by scripts/install-admin.py --allow-windows-start beside its polkit
+# rule, which polkit keeps unreadable to the user. Root-owned, so the user
+# cannot fake it; a stale marker only brings back an authorization prompt.
+QUICK_MARKER = Path("/usr/local/lib/omachines/windows-start-allowed")
+SHUTDOWN_DROPIN = Path("/etc/systemd/system/docker.service.d/omachines-windows-shutdown.conf")
+
+
+def quick_lifecycle():
+    # True when starting and stopping Windows needs no password or terminal.
+    try:
+        status = QUICK_MARKER.lstat()
+    except OSError:
+        return False
+    return status.st_uid == 0 and QUICK_MARKER.is_file() and not QUICK_MARKER.is_symlink()
+
+
 def capabilities(config):
     workspace = Path(config["setupWorkspace"]) if config["setupWorkspace"] else None
     lifecycle = Path("/usr/bin/omarchy-windows-vm").is_file()
@@ -362,7 +412,8 @@ def capabilities(config):
             "cua": bool(wrapper("windows-vm-mcp")), "aside": bool(wrapper("windows-vm-aside-mcp")) and config["asideEnabled"],
             "backup": bool(workspace and (workspace/"create-development-backup.sh").is_file()),
             "omarchy": lifecycle, "lifecycle": lifecycle, "shared": True, "console": True, "handoff": True,
-            "asideSupported": True, "catalogue": True, "rehearsal": True, "rollback": True}
+            "asideSupported": True, "catalogue": True, "rehearsal": True, "rollback": True,
+            "restart": ssh, "update": ssh, "quickLifecycle": quick_lifecycle()}
 
 
 def sample_state():
@@ -372,22 +423,22 @@ def sample_state():
             "resources":{"cpu":4,"memoryBytes":8589934592,"diskBytes":204946587648,"diskFreeBytes":149485748224},
             "capabilities":{"viewer":True,"ssh":True,"cua":True,"aside":True,"backup":True,"omarchy":True,"lifecycle":True,
                             "shared":True,"console":True,"handoff":True,"asideSupported":True,"catalogue":True,
-                            "rehearsal":True,"rollback":True},
+                            "rehearsal":True,"rollback":True,"restart":True,"update":True,"quickLifecycle":True},
+            "guest":{"osVersion":"26H2 build 26300.9711","rebootPending":False,"updateStatus":"complete","updatedAt":now()},
             "machines":[{"id":"windows","name":"Windows 11","provider":"omarchy-windows","state":"running","summary":"Windows is ready","active":True,"selected":True}],
             "backups":[{"label":"Development-ready","createdAt":now(),"verified":True,"restoreTested":False}],
             "operation":{},"demo":True,"viewerOpen":False,"storage":{"availableBytes":107374182400},"sharedPath":"~/Windows"}
 
 
 def windows_reachability(op):
-    ssh_port, console = tcp(2222), tcp(8006)
-    if ssh_port or console:
-        return ("running", "Windows is reachable") if ssh_port else ("starting", "Windows is starting")
+    # Published ports exist exactly while the container runs. Windows itself is
+    # up once its sshd answers; until then it is starting.
+    if tcp(2222) or tcp(8006):
+        return ("running", "Windows is reachable") if ssh_answering() else ("starting", "Windows is starting")
     op = last_operation(op, "windows")
     if op.get("action") == "backup" and op.get("status") in ("starting", "running"):
         return "unreachable", "Backup in progress"
-    if op.get("action")=="stop" and op.get("status")=="complete":
-        return "stopped", "Windows is stopped"
-    return "unreachable", "Windows is not reachable"
+    return "stopped", "Windows is stopped"
 
 
 def collect_windows(config, deep=False, previous=None):
@@ -397,7 +448,8 @@ def collect_windows(config, deep=False, previous=None):
     op = operation()
     s = {"schemaVersion":1,"name":"Windows 11","checkedAt":now(),"demo":False,"capabilities":caps,
          "operation":op,"viewerOpen":bool(viewer_windows()),"backups":backups(config),"checks":{},
-         "sharedPath":str(Path.home()/"Windows"),"storage":{},"resources":{},"error":""}
+         "sharedPath":str(Path.home()/"Windows"),"storage":{},"resources":{},"error":"",
+         "hostShutdownSafe":SHUTDOWN_DROPIN.is_file()}
     try:
         usage = shutil.disk_usage(Path.home()/".windows")
         s["storage"] = {"availableBytes":usage.free,"totalBytes":usage.total}
@@ -466,12 +518,7 @@ def collect_windows(config, deep=False, previous=None):
 
 
 def aside_cli_status():
-    ssh=wrapper('windows-vm-ssh')
-    if not ssh:
-        raise OperationError('Windows SSH connection is missing')
-    code=(ROOT/'backend/aside-cli.ps1').read_text()
-    encoded=base64.b64encode(code.encode('utf-16-le')).decode()
-    return json.loads(run([ssh,f'powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}'],15))
+    return json.loads(guest_powershell((ROOT/'backend/aside-cli.ps1').read_text(),15))
 
 
 def windows_details(config, machine, state, deep, previous):

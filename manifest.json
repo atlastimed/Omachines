@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "atlastimed.omachines",
   "name": "Omachines",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "atlastimed",
   "license": "MIT",
   "description": "Windows and Omarchy VM controls, agent connections and complete backups in the Omarchy bar.",

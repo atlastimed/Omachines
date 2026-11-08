@@ -59,10 +59,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.parse_guest({'asidePath':good})['asidePath'],good)
         self.assertEqual(core.parse_guest({'asidePath':good+' --bad'})['asidePath'],'')
 
-    def test_unknown_is_not_stopped(self):
+    def test_no_published_ports_means_stopped(self):
         with patch('core.tcp',return_value=False),patch('core.viewer_windows',return_value=[]),patch('core.backups',return_value=[]):
             state=core.collect(core.settings())
-        self.assertEqual(state['state'],'unreachable')
+        self.assertEqual(state['state'],'stopped')
         self.assertEqual(state['checks']['ssh']['status'],'offline')
 
     def test_successful_stop_records_stopped(self):
