@@ -6,7 +6,8 @@ SSH/Cua/Aside bridges may have broad access to each guest and its signed-in apps
 
 Omachines adds no root daemon, network listener or credential store. Passive
 checks do not request elevation. Explicit VM lifecycle and backup operations
-use a visible terminal and the existing authorization boundary. Confirmations
+use a visible terminal and the existing authorization boundary, except what the
+optional polkit rule in the version 0.5 section below allows. Confirmations
 reduce accidental destructive actions; they do not defend against a malicious
 process already running as the same user.
 
@@ -120,3 +121,32 @@ It removes every mount layer before switching storage and refuses if one remains
 Helper 0.3.1 changes only the order of a restore: it checks space and asks for the
 typed confirmation before extracting, confirms the extracted copy contains Windows
 storage, and treats end of input as cancellation.
+
+## Version 0.5 passwordless start and updates
+
+`install-admin.py --allow-windows-start` is an explicit opt-in. Its polkit rule allows
+only `/usr/bin/omarchy-windows-vm __priv up`, `up_wait` and `down`, compared as whole
+command lines, for one named user's active session. Those commands take no input and act
+on the root-owned compose file, whose mounts Omarchy checks. A process running as you
+could start or stop Windows without asking. It could already read the VM's disk file and
+the SSH key in your home, so this adds little beyond the use of about 8 GiB of RAM. It
+does not cover `write_compose`, `remove`, backup, restore or allocation.
+`--revoke-windows-start` removes it.
+
+**Update Windows and tools** runs a script from this release as a scheduled task with
+your Windows account's highest privileges, and installs what Windows Update, winget,
+rustup, mise, Cua and Aside publish. Cua's installer checks its checksums and Authenticode
+signature. Treat an update like installing those programs by hand: back up first if you
+want a way back. Guest output is reduced to known stages and counts before it reaches the
+panel or its history.
+
+The viewer gives Windows no microphone unless `~/.config/windows/viewer.conf` says
+`microphone=yes` (a setting of the host wrapper, not this plugin).
+
+## Tests and signals
+
+Backend code signals process groups only through `probes.signal_group`, which refuses
+anything but a real child's pid: `killpg(1)` is `kill(-1)`, every process you own. On
+8 November 2026 a test whose mocked pid reached `os.killpg` killed the desktop session
+running it. `scripts/check.py` therefore runs the Python tests in a private PID namespace,
+without the session's variables or your home. Run them through it, not directly.

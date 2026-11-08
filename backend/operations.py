@@ -322,6 +322,8 @@ def restart_windows():
     if not ssh_banner():
         raise OperationError("Windows is not answering over SSH; use the recovery console or shut it down")
     record("restart","running","Restarting Windows")
+    # The restart ends the RDP session, and with it the viewer.
+    reopen=wrapper("windows-vm-launch") if viewer_windows() else None
     # A restart needs no root: it stays inside the guest, and the VM keeps running.
     run([ssh,'shutdown.exe /r /t 2 /d p:0:0 /c "Requested by Omachines"'],20)
     with providing_work():
@@ -335,6 +337,9 @@ def restart_windows():
                     raise OperationError(failure)
                 time.sleep(restart_poll())
             if answering:
+                if reopen:
+                    subprocess.Popen([reopen],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+                    return "Windows restarted; viewer reopened"
                 return "Windows restarted"
             record("restart","running","Windows is restarting")
 

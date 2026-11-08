@@ -236,10 +236,19 @@ class Worker(unittest.TestCase):
 class RestartTests(Worker):
     def test_waits_for_windows_to_go_and_come_back(self):
         answers = iter([True, True, False, False, True])
-        with patch("operations.ssh_banner", side_effect=lambda: next(answers)), patch("operations.run") as run:
+        with patch("operations.ssh_banner", side_effect=lambda: next(answers)), patch("operations.run") as run, \
+                patch("operations.viewer_windows", return_value=[]), patch("operations.subprocess.Popen") as launch:
             self.assertEqual(operations.restart_windows(), "Windows restarted")
         self.assertIn("shutdown.exe /r", run.call_args[0][0][1])
         self.assertIn("Windows is restarting", self.records)
+        launch.assert_not_called()
+
+    def test_an_open_viewer_is_reopened_once_windows_is_back(self):
+        answers = iter([True, False, True])
+        with patch("operations.ssh_banner", side_effect=lambda: next(answers)), patch("operations.run"), \
+                patch("operations.viewer_windows", return_value=["0x1"]), patch("operations.subprocess.Popen") as launch:
+            self.assertEqual(operations.restart_windows(), "Windows restarted; viewer reopened")
+        self.assertEqual(launch.call_args[0][0], ["/fixture/windows-vm-launch"])
 
     def test_refused_when_ssh_does_not_answer(self):
         with patch("operations.ssh_banner", return_value=False), patch("operations.run") as run:
@@ -249,7 +258,7 @@ class RestartTests(Worker):
 
     def test_a_blocked_restart_is_reported(self):
         clock = iter(range(0, 100000, 1000))
-        with patch("operations.ssh_banner", return_value=True), patch("operations.run"), \
+        with patch("operations.ssh_banner", return_value=True), patch("operations.run"), patch("operations.viewer_windows", return_value=[]), \
                 patch("operations.time.monotonic", side_effect=lambda: next(clock)):
             with self.assertRaisesRegex(core.OperationError, "did not begin restarting"):
                 operations.restart_windows()
@@ -258,7 +267,7 @@ class RestartTests(Worker):
         def banner():
             operations.stopping.append(15)
             return True
-        with patch("operations.ssh_banner", side_effect=banner), patch("operations.run"):
+        with patch("operations.ssh_banner", side_effect=banner), patch("operations.run"), patch("operations.viewer_windows", return_value=[]):
             self.assertIn("stopped following", operations.restart_windows())
 
 

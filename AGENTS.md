@@ -6,7 +6,8 @@ Read README.md and PLAN.md. This is a native Omarchy plugin for existing VMs
 - Keep changes in this repository and the user-owned plugin install. Never edit
   `/usr/share/omarchy` or duplicate the system virtualization stack.
 - Preserve the existing Windows wrappers, encrypted disks, backup files and
-  root authorization boundary. Never store credentials or guest content here.
+  root authorization boundary: only start and stop may skip authorization, through
+  the opt-in polkit rule. Never store credentials or guest content here.
 - Ask before tests that stop/restart either VM or close user applications.
   Read-only probes of a running VM (`omarchy-vm status --json`) are fine.
 - Use one shared service across monitors, theme-native controls and bounded

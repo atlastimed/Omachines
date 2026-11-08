@@ -34,6 +34,8 @@ $pending=[bool](@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate
 # The last Omachines update run: its status and finish time only.
 $maintenance=$null
 try { $maintenance=Get-Content -Raw 'C:\OEM\Omachines\maintenance.json' -ErrorAction Stop | ConvertFrom-Json } catch {}
+# A power cut leaves "running" behind: only a live task can still be updating.
+if($maintenance -and $maintenance.status -eq 'running' -and (Get-ScheduledTask -TaskName 'Omachines-Maintenance' -ErrorAction SilentlyContinue).State -ne 'Running'){$maintenance.status='failed'}
 [ordered]@{
  desktop=$desktop
  cpu=[int]$cpu.NumberOfLogicalProcessors
