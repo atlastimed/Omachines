@@ -2,7 +2,7 @@
 
 Recorded on 8 November 2026 on Omarchy 4.5.0 (Hyprland 0.56.2, three monitors) with
 Windows 11 26H2 build 26300.9711 under dockur 6.06. Host and guest measurements are from
-the real machine. `scripts/check.py` covers the logic: 233 Python tests in a private PID
+the real machine. `scripts/check.py` covers the logic: 243 Python tests in a private PID
 and network namespace, manifest validation, qmllint and 39 native Qt interaction tests.
 
 ## Incident during this work
@@ -48,7 +48,7 @@ A fresh reviewer read the change without running anything. Fixed from its findin
 - "Windows restarted" could follow one missed probe. It now needs a new start time.
 - A failed update could report success. It now ends as `partial`, worded as problems, and
   a program that cannot start counts as failed.
-- `C:\\OEM`, including scripts run elevated, was writable by any signed-in user, which also
+- `C:\OEM`, including scripts run elevated, was writable by any signed-in user, which also
   applied to the elevated update task. The folder is now locked and the task removed after
   each run. Part of this predates version 0.5.
 - The tests kept the network and part of the session's environment, and could be started
