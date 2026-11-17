@@ -1,0 +1,180 @@
+#!/usr/bin/python3 -I
+"""Use one existing Omachines guest from a terminal or coding agent."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import core
+import history
+import machines
+import omarchy
+from operations import request_action, terminal
+
+
+def snapshot(machine, config):
+    # Only the requested guest. Aside browser/CLI checks are separate from
+    # interactive desktop readiness and have their own controls in the panel.
+    if machine["provider"] == machines.OMARCHY:
+        state = omarchy.collect(config, machine, deep=True)
+    else:
+        state = core.collect_windows({**config, "asideEnabled": False}, deep=True)
+    checks = {name: state["checks"].get(name, {}).get("status", "unknown")
+              for name in ("ssh", "desktop", "cua")}
+    return {"machine": machine["id"], "state": state["state"], "summary": state["summary"],
+            "maintenance": state.get("maintenance"), **checks}
+
+
+def wait_operation(request_id, timeout=600):
+    deadline = time.monotonic() + timeout
+    while True:
+        row = core.operation()
+        if row.get("requestId") != request_id:
+            row = next((item for item in reversed(history.entries())
+                        if item.get("requestId") == request_id), {})
+        status = row.get("status")
+        if status == "complete":
+            return row["message"]
+        if status in ("failed", "interrupted"):
+            raise core.OperationError(row["message"])
+        if time.monotonic() >= deadline or not row:
+            raise core.OperationError("Check the operation in Omachines before retrying.")
+        time.sleep(0.5)
+
+
+def lifecycle(machine, config, action):
+    op = core.operation()
+    if op.get("status") in ("starting", "running"):
+        raise core.OperationError("Another Omachines operation is in progress.")
+    if machine["provider"] == machines.OMARCHY:
+        st = omarchy.status(machine)
+        if st["maintenance"]:
+            raise core.OperationError(f"Omarchy VM maintenance in progress ({st['maintenance']}).")
+        state, detail = omarchy.classify(st, op)
+    else:
+        state, detail = core.windows_reachability(op)
+    if action == "start" and state in ("running", "starting"):
+        return
+    if action == "stop" and state == "stopped":
+        return
+    if action == "start" and state != "stopped":
+        raise core.OperationError(detail)
+    if terminal(action, machine):
+        print("Windows authorization uses the Omachines terminal on the host.", file=sys.stderr, flush=True)
+    token = request_action(action, config, confirmed=action == "stop", target_id=machine["id"])
+    print(wait_operation(token), file=sys.stderr, flush=True)
+
+
+def wait_ready(machine, config, desktop, timeout=300):
+    ssh = machine["connections"]["ssh"]
+    deadline = time.monotonic() + timeout
+    detail = "Waiting for the guest to answer over SSH"
+    while time.monotonic() < deadline:
+        if desktop:
+            state = snapshot(machine, config)
+            if state["ssh"] == "ready" and state["desktop"] == "available" and state["cua"] == "ready":
+                return state
+            detail = f"{state['summary']} (SSH {state['ssh']}, desktop {state['desktop']}, Cua {state['cua']})"
+            if (state["maintenance"] or state["state"] in ("paused", "error", "unknown", "stopping")
+                    or state["desktop"] in ("locked", "disconnected") or "missing" in (state["ssh"], state["cua"])):
+                break
+        else:
+            probe = "printf ready" if machine["provider"] == machines.OMARCHY else "Write-Output ready"
+            try:
+                if core.run([ssh, probe], 8).strip() == "ready":
+                    return {"machine": machine["id"], "ssh": "ready"}
+            except core.OperationError:
+                pass
+        time.sleep(3)
+    raise core.OperationError(f"{machine['name']} is not ready. {detail}. See Omachines → Agents.")
+
+
+# Started only for an explicit desktop call. Multiple SSH invocations use one
+# desktop-user process, so named Cua sessions and snapshot tokens survive.
+LINUX_CUA = "set -e\n" + omarchy.SESSION_SIGNATURE + """
+test -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" && hyprctl -j monitors >/dev/null || {
+  echo 'Guest Hyprland is unavailable. Check Omachines → Agents.' >&2; exit 1; }
+if ! cua-driver status >/dev/null 2>&1; then
+  unit=omachines-agent-cua.service
+  systemctl --user is-active --quiet "$unit" ||
+    systemd-run --user --quiet --collect --unit="$unit" --property=PartOf=graphical-session.target \\
+      --setenv=CUA_DRIVER_RS_ENABLE_WAYLAND=1 /usr/bin/cua-driver serve ||
+    systemctl --user is-active --quiet "$unit"
+  for i in {1..30}; do
+    cua-driver status >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+fi
+exec /usr/bin/cua-driver call """
+WINDOWS_CUA = r'''& "$env:LOCALAPPDATA\Programs\Cua\cua-driver\bin\cua-driver.exe" call --socket '\\.\pipe\cua-driver' '''
+
+
+def cua(machine, tool, arguments, image):
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", tool):
+        raise ValueError("Choose a Cua tool by name (for example, list_windows).")
+    data = json.loads(arguments)
+    if not isinstance(data, dict):
+        raise ValueError("Cua arguments must be a JSON object.")
+    argv = [tool]
+    if image:
+        argv += ["--screenshot-out-file", image]
+    if machine["provider"] == machines.OMARCHY:
+        command = LINUX_CUA + shlex.join(argv)
+    else:
+        # JSON goes through stdin, preserving quotes and Unicode even with
+        # Windows PowerShell's legacy native-command argument handling.
+        command = WINDOWS_CUA + " ".join("'" + arg.replace("'", "''") + "'" for arg in argv) + "; exit $LASTEXITCODE"
+    result = subprocess.run([machine["connections"]["ssh"], command],
+                            input=json.dumps(data, ensure_ascii=True).encode() + b"\n")
+    return result.returncode
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("machine", choices=["omarchy", "windows"])
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("status", help="fresh shell and desktop checks as JSON")
+    start = sub.add_parser("start", help="start headlessly if needed and wait for authenticated SSH")
+    start.add_argument("--desktop", action="store_true", help="also wait for the desktop and its Cua bridge")
+    sub.add_parser("stop", help="shut down this guest through Omachines")
+    run = sub.add_parser("run", help="run one guest shell command, forwarding stdin and its exit status")
+    run.add_argument("command", help="one Bash (Omarchy) or PowerShell (Windows) command string")
+    gui = sub.add_parser("cua", help="call a guest desktop tool over SSH")
+    gui.add_argument("tool")
+    gui.add_argument("arguments", nargs="?", default="{}", help="a JSON object")
+    gui.add_argument("--image", help="save the captured image at this guest path")
+    args = parser.parse_args(argv)
+    config = core.settings()
+    if config["demo"]:
+        raise core.OperationError("Turn off Omachines demo mode to use a real guest.")
+    machine = machines.get(args.machine)
+    ssh = machine["connections"]["ssh"]
+    if args.action in ("start", "run", "cua") and not os.access(ssh, os.X_OK):
+        raise core.OperationError(f"Missing SSH wrapper: {ssh}")
+    if args.action == "run":
+        os.execv(ssh, [ssh, "--", args.command])
+    if args.action == "cua":
+        return cua(machine, args.tool, args.arguments, args.image)
+    if args.action == "status":
+        result = snapshot(machine, config)
+    else:
+        lifecycle(machine, config, args.action)
+        if args.action == "stop":
+            return 0
+        result = wait_ready(machine, config, args.desktop)
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (core.OperationError, OSError, ValueError) as error:
+        sys.exit(f"omachines-agent: {error}")

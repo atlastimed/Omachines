@@ -210,6 +210,36 @@ and leaves at least 4 GiB of host RAM.
 
 ## Agents
 
+Install the shared **omachines-vm** skill and host command with
+`python3 install.py --agent-tools`. Claude Code and Codex discover the same
+installed skill. The command works from any directory, including an existing
+chat started while both guests were off.
+
+```bash
+omachines-agent omarchy status
+omachines-agent omarchy start --desktop
+omachines-agent omarchy run 'hostname; id -un'
+omachines-agent omarchy cua list_windows '{"app":"foot","session":"vm-test"}'
+omachines-agent omarchy cua end_session '{"session":"vm-test"}'
+omachines-agent windows start
+omachines-agent windows run '$env:COMPUTERNAME'
+```
+
+Use `start` for shell work. It waits for an authenticated command.
+`start --desktop` also checks the interactive session and Cua. Both commands
+start headlessly and target the named guest independently of the panel selection.
+`stop` uses the panel's normal shutdown operation. The status command returns
+JSON for stopped guests too. The `ssh`, `desktop` and `cua` fields report
+each connection separately.
+
+Desktop calls use the guest over SSH and work with the client's VM MCP entry
+disabled. On the first call in an Omarchy boot, the CLI reuses a running guest
+Cua daemon or starts one with standard permissions as a transient user service.
+Windows uses its existing interactive named pipe. The skill covers named
+sessions, screenshots, guest paths and file transfer. The optional links in
+`~/.local/bin`, `~/.agents/skills` and `~/.claude/skills` follow subsequent
+plugin updates. Removal cleans up links owned by Omachines.
+
 The connection guide names each machine's existing bridges. For the Omarchy VM,
 `omarchy-vm-ssh '<command>'` runs a command in the guest and `omarchy-vm-mcp` is
 Cua Driver's stdio MCP in its auto-signed-in Hyprland session; `ssh omarchy-vm` also
@@ -245,6 +275,6 @@ the Python tests in a private PID namespace, without the desktop session's varia
 or your home folder, because they start processes and send signals.
 Physical Hyprland and live Windows checks are recorded separately.
 
-See [validation](VALIDATION-v0.5.md) ([v0.3](VALIDATION-v0.3.md), [v0.2](VALIDATION-v0.2.md)), [security boundaries](SECURITY.md),
+See [agent workflow validation](VALIDATION-v0.6.md) ([v0.5](VALIDATION-v0.5.md), [v0.3](VALIDATION-v0.3.md), [v0.2](VALIDATION-v0.2.md)), [security boundaries](SECURITY.md),
 [contribution checks](CONTRIBUTING.md), and the
 [Omarchy plugin contract](https://plugins.omarchy.org/develop.html).
