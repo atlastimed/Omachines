@@ -16,10 +16,11 @@ import time
 ROOT = Path(__file__).resolve().parent
 ID = "atlastimed.omachines"
 DOCS = ("README.md", "LICENSE", "INTEGRATION.md", "SECURITY.md",
-        "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "VALIDATION-v0.3.md", "VALIDATION-v0.5.md", "REVIEW-FIXES.md")
+        "CONTRIBUTING.md", "VALIDATION.md", "VALIDATION-v0.2.md", "VALIDATION-v0.3.md", "VALIDATION-v0.5.md", "VALIDATION-v0.6.md", "REVIEW-FIXES.md")
 FILES = ("manifest.json", "BarWidget.qml", "BarGlyph.qml", "MachineView.qml", "StatusRow.qml",
          "Service.qml", "Model.js", "BackupControls.qml", "ResourceControls.qml", *DOCS)
-BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "guest-status.ps1", "guest-maintain.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1", "supervise.py")
+BACKEND = ("core.py", "operations.py", "omarchy.py", "mcp.py", "probes.py", "omachinesctl", "omachines-agent", "guest-status.ps1", "guest-maintain.ps1", "machines.py", "history.py", "admin.py", "aside-cli.ps1", "supervise.py")
+SKILL = Path("skills/omachines-vm/SKILL.md")
 STATE = "installer.json"
 SECTIONS = ("left", "centerBegin", "center", "centerEnd", "right")
 DEFAULT_PLACEMENT = {"section": "right", "index": 1}
@@ -196,9 +197,28 @@ def stage_release(staged):
         shutil.copy2(file, runtime/file.relative_to(ROOT))
     for file in DOCS:
         shutil.copy2(ROOT/file, staged/file)
+    (staged/SKILL.parent).mkdir(parents=True)
+    shutil.copy2(ROOT/SKILL, staged/SKILL)
+    # Omarchy rejects all in-plugin symlinks. Keep one stable entry for the
+    # external PATH link while the worker and its imports stay versioned.
+    launcher = staged/"omachines-agent"
+    launcher.write_text('#!/bin/sh\nroot=$(dirname -- "$(readlink -f -- "$0")") || exit 1\n'
+                        f'exec "$root/{relative}/backend/omachines-agent" "$@"\n')
+    launcher.chmod(0o755)
     manifest = json.loads((ROOT/"manifest.json").read_text())
     manifest["entryPoints"] = {key:str(relative/value) for key,value in manifest["entryPoints"].items()}
     (staged/"manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
+
+
+def agent_links(destination):
+    home = Path.home()
+    return {home/".local/bin/omachines-agent": destination/"omachines-agent",
+            home/".agents/skills/omachines-vm": destination/SKILL.parent,
+            home/".claude/skills/omachines-vm": destination/SKILL.parent}
+
+
+def owned_link(path, target):
+    return path.is_symlink() and path.readlink() == target
 
 
 def install(args):
@@ -210,6 +230,11 @@ def install(args):
         raise ValueError("Refusing to replace a symlinked plugin directory")
     if destination.exists() and json.loads((destination/"manifest.json").read_text()).get("id") != ID:
         raise ValueError("Destination is not the Omachines plugin")
+    links = agent_links(destination)
+    if args.agent_tools:
+        for path, target in links.items():
+            if os.path.lexists(path) and not owned_link(path, target):
+                raise ValueError(f"Agent tools cannot use {path}: another installation owns it")
     old_config = read_config(shell)
     if args.setup_workspace:
         args.setup_workspace = args.setup_workspace.expanduser().resolve(strict=True)
@@ -218,7 +243,7 @@ def install(args):
     run("omarchy-shell", "shell", "ping")
     if not args.uninstall:
         run("omarchy", "plugin", "validate", str(ROOT))
-        for file in [*(ROOT/f for f in FILES), *(ROOT/"backend"/f for f in BACKEND)]:
+        for file in [*(ROOT/f for f in FILES), *(ROOT/"backend"/f for f in BACKEND), ROOT/SKILL]:
             if not file.is_file() or file.is_symlink():
                 raise ValueError("Missing or symlinked release file: " + str(file))
     backup = private_dir(state_dir()/"install-backups"/dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
@@ -279,9 +304,15 @@ def install(args):
         if not args.uninstall and args.setup_workspace:
             read_config(shell)
             shell_mutation("setBarWidget", ID, "setupWorkspace", json.dumps(str(args.setup_workspace)), "{}")
+        for path, target in links.items():
+            if args.uninstall and owned_link(path, target):
+                path.unlink()
+            elif args.agent_tools and not owned_link(path, target):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(target)
     except Exception as error:
         raise RuntimeError(f"Omachines files are {'removed' if args.uninstall else 'installed'}, but its bar "
-                           f"settings did not finish updating ({error}). Run the same install.py command again to finish.") from error
+                           f"settings or agent links did not finish updating ({error}). Run the same install.py command again to finish.") from error
     print("Omachines removed; VM, backups, private state and plugin options preserved." if args.uninstall
           else "Omachines installed. Click VM in the bar." if pending
           else "Omachines updated; its bar entry was left as it was.")
@@ -293,7 +324,9 @@ def install(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--uninstall", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--uninstall", action="store_true")
+    mode.add_argument("--agent-tools", action="store_true", help="link the CLI and shared Claude Code/Codex skill")
     parser.add_argument("--setup-workspace", type=Path)
     args = parser.parse_args(argv)
     sys.path.insert(0, str(ROOT/"backend"))

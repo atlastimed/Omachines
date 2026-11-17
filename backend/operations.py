@@ -127,15 +127,17 @@ def notify(message, config):
                          stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
-def request_action(action, config, confirmed=False, parameters=None, machine_id=None):
+def request_action(action, config, confirmed=False, parameters=None, machine_id=None, *, target_id=None):
     if action not in ACTIONS:
         raise OperationError("Unknown action")
     if config["demo"]:
         raise OperationError("Demo mode never controls a real VM")
     if action in DISRUPTIVE and not confirmed:
         raise OperationError("Confirm this action first")
-    from machines import selected
-    try: machine=selected()
+    from machines import get, selected
+    # The panel guards its selection. An agent names the guest independently
+    # and uses the same reservation, worker and authorization path.
+    try: machine=selected() if target_id is None else get(target_id)
     except ValueError:raise OperationError("Machine configuration needs attention") from None
     # A confirmation is for the machine it was shown with; never retarget it.
     if machine_id is not None and machine_id!=machine["id"]:
@@ -662,7 +664,7 @@ def perform(action, config, parameters=None, machine=None):
     if action=="connections":
         m=machine;folder=state_dir()/'reports';folder.mkdir(exist_ok=True,mode=0o700)
         path=folder/'connections.txt'
-        text='Omachines connection guide\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\nPlain SSH and scp: ssh windows-vm, when ~/.ssh/config includes its settings. The guest shell is PowerShell.\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
+        text='Omachines connection guide\n\nWith Omachines agent tools installed: omachines-agent windows start --desktop\nUse the omachines-vm skill in Claude Code or Codex.\n\nWindows commands: '+m['connections']['ssh']+'\nWindows GUI MCP: '+m['connections']['cua']+'\nAside browser MCP: '+m['connections']['aside']+'\nPlain SSH and scp: ssh windows-vm, when ~/.ssh/config includes its settings. The guest shell is PowerShell.\n\nConfigure these existing commands in your chosen agent; no passwords belong in MCP settings.\nOpen and unlock Windows for GUI work. Open Aside for browser tools.\nAside CLI sign-in and model access are separate from browser availability.\nRemote debugging is not automatically enabled by Omachines.\nAgents can reach accounts signed into this Windows user.\n'
         fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,'w') as f:f.write(text)
         subprocess.Popen(['xdg-open',str(path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)

@@ -56,6 +56,7 @@ class ResponseTests(unittest.TestCase):
             self.assertEqual(result["checks"]["ssh"]["status"], "ready")
             self.assertEqual(result["checks"]["desktop"]["status"], "available")
             self.assertEqual(result["checks"]["cua"]["status"], "error")
+            self.assertIn("check desktop tools", result["summary"])
             self.assertEqual(result["resources"]["cpu"], 4)
 
     def test_unexpected_failure_survives_shallow_polls_then_recovers(self):

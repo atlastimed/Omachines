@@ -15,12 +15,20 @@ from core import (OperationError, carried_checks, check, cua_check, focus_window
 
 BACKUP_ID = re.compile(r"omarchy-\d{8}T\d{6}Z")
 ID = "omarchy"
+# Older SSH setups only publish the signature in the user service manager.
+SESSION_SIGNATURE = """if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+  HYPRLAND_INSTANCE_SIGNATURE=$(systemctl --user show-environment 2>/dev/null | sed -n 's/^HYPRLAND_INSTANCE_SIGNATURE=//p')
+  export HYPRLAND_INSTANCE_SIGNATURE
+fi
+"""
 # One read-only probe: CPU count, memory, root filesystem and whether the
-# auto-signed-in Hyprland session has published its environment.
+# signed-in compositor answers a query (systemd can retain stale variables).
 PROBE = ("printf 'cpu=%s\\n' \"$(nproc)\"; "
          "awk '/^MemTotal:/{print \"memoryKiB=\" $2}' /proc/meminfo; "
          "df -B1 --output=size,avail / | awk 'NR==2{print \"disk=\" $1; print \"free=\" $2}'; "
-         "if systemctl --user show-environment 2>/dev/null | grep -q '^HYPRLAND_INSTANCE_SIGNATURE='; "
+         + SESSION_SIGNATURE +
+         "if timeout 3 hyprctl -j monitors 2>/dev/null | python3 -c "
+         "'import json,sys; m=json.load(sys.stdin); sys.exit(not isinstance(m,list) or not m)' 2>/dev/null; "
          "then echo desktop=available; else echo desktop=unavailable; fi")
 STAGES = {"copying": "Copying the VM disk and firmware", "verifying": "Verifying the archive and checksum",
           "starting": "Starting Omarchy VM again", "restored": "Backup restored"}
@@ -242,11 +250,11 @@ def collect(config, machine, deep=False, previous=None):
     try:
         guest = guest_probe(machine)
     except (OperationError, ValueError, OSError):
-        s["checks"]["ssh"] = check("error", "SSH did not respond. Open the VM and check its network.")
+        s["checks"]["ssh"] = check("error", "Guest command check failed. Check omarchy-vm-ssh and its pinned SSH connection.")
         s["checks"]["desktop"] = check("unknown", "Desktop state unavailable")
         return s
     s["resources"] = {k: guest[k] for k in ("cpu", "memoryBytes", "diskBytes", "diskFreeBytes")}
-    s["checks"]["ssh"] = check("ready", "Command access ready; agents have passwordless sudo in the guest")
+    s["checks"]["ssh"] = check("ready", "Command access ready")
     desktop = guest["desktop"] == "available"
     s["checks"]["desktop"] = check("available", "Hyprland desktop session available") if desktop else \
         check("signed-out", "Hyprland session is not running yet")
@@ -255,6 +263,8 @@ def collect(config, machine, deep=False, previous=None):
     if s["capabilities"]["cua"]:
         s["checks"]["cua"] = cua_check(executable(machine["connections"]["cua"]), "Cua did not respond. Check the guest desktop session.") \
             if desktop else check("offline", "Waiting for the desktop session")
+    if desktop and s["checks"]["cua"]["status"] != "ready":
+        s["summary"] = "Omarchy VM commands are ready; check desktop tools"
     return s
 
 
@@ -327,6 +337,8 @@ def viewer_window(client):
 def guide(machine):
     c = machine["connections"]
     return ("Omachines connection guide: " + machine["name"] + "\n\n"
+            "With Omachines agent tools installed: omachines-agent omarchy start --desktop\n"
+            "Use the omachines-vm skill in Claude Code or Codex.\n\n"
             "Guest commands (one command as the guest user): " + c["ssh"] + " '<command>'\n"
             "Guest desktop MCP (Cua Driver, stdio): " + c["cua"] + "\n"
             "VM control (status, start --wait, stop, view, screenshot, backups): " + c["control"] + "\n"

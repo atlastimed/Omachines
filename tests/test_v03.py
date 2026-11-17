@@ -523,6 +523,12 @@ class OperationTests(Base):
         operations.request_action("stop", self.config, True, {}, "omarchy")
         self.launch.assert_called_once()
 
+    def test_explicit_agent_target_does_not_change_the_panels_selection(self):
+        token = operations.request_action("start", self.config, target_id="windows")
+        self.assertEqual(machines.selected()["id"], "omarchy")
+        self.assertEqual(core.operation()["machineId"], "windows")
+        self.assertEqual(core.operation()["requestId"], token)
+
     def test_worker_stays_pinned_to_requested_machine(self):
         self.patch(patch("operations.settings", return_value=self.config))
         perform = self.patch(patch("operations.perform", return_value="Done"))

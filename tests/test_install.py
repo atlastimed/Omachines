@@ -103,6 +103,30 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.mutations, [])
         self.assertFalse((self.destination/"old-runtime").exists())
 
+    def test_opt_in_agent_links_survive_update_and_remove_only_owned_links(self):
+        self.invoke("--agent-tools")
+        cli, codex, claude = install.agent_links(self.destination)
+        self.assertTrue(os.access(cli, os.X_OK))
+        self.assertFalse(any(file.is_symlink() for file in self.destination.rglob("*")))
+        self.assertTrue((claude/"SKILL.md").samefile(codex/"SKILL.md"))
+        self.invoke()
+        self.assertTrue(cli.resolve().is_relative_to(self.destination))
+        claude.unlink()
+        claude.mkdir()
+        self.invoke("--uninstall")
+        self.assertFalse(os.path.lexists(cli))
+        self.assertFalse(os.path.lexists(codex))
+        self.assertTrue(claude.is_dir())
+
+    def test_agent_link_conflict_leaves_existing_installation_intact(self):
+        cli = self.home/".local/bin/omachines-agent"
+        cli.parent.mkdir(parents=True)
+        cli.symlink_to(self.home/"unavailable-program")
+        with self.assertRaisesRegex(ValueError, "another installation"):
+            self.invoke("--agent-tools")
+        self.assertTrue((self.destination/"old-runtime").exists())
+        self.assertEqual(cli.readlink(), self.home/"unavailable-program")
+
     def test_failed_update_rolls_back_files_only(self):
         def fail():
             self.concurrent_edit()

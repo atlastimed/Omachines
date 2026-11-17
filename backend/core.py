@@ -15,7 +15,7 @@ from mcp import Client, ProbeError
 from probes import output
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 ID = "atlastimed.omachines"
 
 
@@ -522,6 +522,8 @@ def collect_windows(config, deep=False, previous=None):
     s["checks"]["cua"]=check("missing","Cua connection is not configured")
     if caps["cua"]:
         s["checks"]["cua"]=cua_check(wrapper("windows-vm-mcp"),"Cua did not respond. Unlock Windows and check again.")
+    if guest["desktop"] == "available" and s["checks"]["cua"]["status"] != "ready":
+        s["summary"] = "Windows commands are ready; check desktop tools"
     s["checks"]["aside"]=check("disabled","Aside integration is disabled")
     if caps["aside"]:
         s["checks"]["aside"]=check("closed","Open Aside to use its browser tools")
